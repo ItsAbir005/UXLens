@@ -1,0 +1,16 @@
+{
+  "name": "uxlens-mcp-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "inspector": "npx @modelcontextprotocol/inspector@latest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "express": "^5.1.0",
+    "uxlens": "file:..",
+    "zod": "^4.1.12"
+  }
+}

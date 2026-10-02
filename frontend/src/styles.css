@@ -1,0 +1,23 @@
+@import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+:root {
+  color: #17342d;
+  background: #f2efe7;
+  font-family: "Space Grotesk", sans-serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+main {
+  min-height: 100vh;
+  padding: clamp(3rem, 9vw, 8rem) clamp(1.5rem, 8vw, 9rem);
+  background: radial-gradient(circle at 80% 15%, #f4c38e 0, transparent 27rem), #f2efe7;
+}
+.eyebrow { color: #d25c3b; font: 500 0.8rem "DM Mono", monospace; letter-spacing: 0.08em; text-transform: uppercase; }
+h1 { max-width: 680px; margin: 2rem 0 1rem; font-size: clamp(3.5rem, 9vw, 8rem); line-height: 0.9; letter-spacing: -0.04em; }
+.lede { max-width: 560px; font-size: clamp(1.1rem, 2vw, 1.5rem); line-height: 1.45; }
+.status { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); max-width: 760px; margin-top: 5rem; border-top: 1px solid #17342d; border-bottom: 1px solid #17342d; }
+.status div { display: grid; gap: 0.6rem; padding: 1.25rem 1rem 1.25rem 0; }
+.status span { color: #59716a; font: 500 0.75rem "DM Mono", monospace; text-transform: uppercase; }
+.status strong { font-size: 1.2rem; }
+@media (max-width: 600px) { .status { grid-template-columns: 1fr; } .status div { border-bottom: 1px solid #cad0c4; } .status div:last-child { border-bottom: 0; } }

@@ -1,0 +1,11 @@
+{
+  "name": "uxlens",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prisma:generate": "npm --prefix backend run prisma:generate",
+    "prisma:validate": "npm --prefix backend run prisma:validate",
+    "prisma:migrate": "npm --prefix backend run prisma:migrate"
+  }
+}
