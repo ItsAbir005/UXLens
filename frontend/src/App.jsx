@@ -1,15 +1,26 @@
 import { useEffect, useState } from "react";
 
 const backendUrl = import.meta.env.VITE_BACKEND_URL || "http://localhost:4000";
+const mcpUrl = import.meta.env.VITE_MCP_URL || "http://localhost:5000";
 
 export default function App() {
-  const [health, setHealth] = useState({ status: "checking", database: "checking" });
+  const [health, setHealth] = useState({ backend: "checking", database: "checking", mcp: "checking" });
 
   useEffect(() => {
-    fetch(`${backendUrl}/health`)
-      .then((response) => response.json())
-      .then(setHealth)
-      .catch(() => setHealth({ status: "offline", database: "unavailable" }));
+    const readHealth = (url) => fetch(url).then((response) => {
+      if (!response.ok) throw new Error("Health check failed");
+      return response.json();
+    });
+
+    Promise.allSettled([readHealth(`${backendUrl}/health`), readHealth(`${mcpUrl}/health`)]).then(([backendResult, mcpResult]) => {
+      const backendHealth = backendResult.status === "fulfilled" ? backendResult.value : {};
+      const mcpHealth = mcpResult.status === "fulfilled" ? mcpResult.value : {};
+      setHealth({
+        backend: backendHealth.status === "ok" ? "connected" : "unavailable",
+        database: backendHealth.database === "connected" ? "connected" : "unavailable",
+        mcp: mcpHealth.status === "ok" ? "connected" : "unavailable"
+      });
+    });
   }, []);
 
   return (
@@ -20,15 +31,15 @@ export default function App() {
       <section className="status" aria-live="polite">
         <div>
           <span>Backend</span>
-          <strong>{health.status}</strong>
+          <strong>Backend: {health.backend === "connected" ? "Connected ✓" : health.backend}</strong>
         </div>
         <div>
           <span>Database</span>
-          <strong>{health.database}</strong>
+          <strong>Database: {health.database === "connected" ? "Connected ✓" : health.database}</strong>
         </div>
         <div>
-          <span>Projects</span>
-          <strong>{health.projectCount ?? "-"}</strong>
+          <span>MCP</span>
+          <strong>MCP: {health.mcp === "connected" ? "Connected ✓" : health.mcp}</strong>
         </div>
       </section>
     </main>

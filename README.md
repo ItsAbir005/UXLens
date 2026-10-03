@@ -10,7 +10,7 @@ UXLens
 `- PostgreSQL  local development database
 ```
 
-The Prisma schema intentionally contains only `Project`. Sessions, events, and UX problems belong to a later phase.
+The Prisma schema contains `Project`, `Session`, and `Event`. UX problems belong to a later phase.
 
 ## Requirements
 
@@ -66,10 +66,35 @@ Services:
 
 - Frontend: http://localhost:3000
 - Backend: http://localhost:4000/health
-- MCP server: http://localhost:5000/mcp
+- MCP health: http://localhost:5000/health
+- MCP transport: http://localhost:5000/mcp
 - PostgreSQL: localhost:5432
 
 The backend health route performs a Prisma `project.count()` query. Application routes use Prisma Client; they do not use raw SQL.
+The frontend checks both `/health` endpoints and displays backend, database, and MCP connectivity.
+
+## Website tracking
+
+The backend serves a lightweight tracker at `http://localhost:4000/tracker.js`. Add it to a demo website:
+
+```html
+<script src="http://localhost:4000/tracker.js"></script>
+```
+
+The tracker records `page_view`, `click`, `hover`, `scroll`, and `navigation` events and posts them to `/api/events`. To associate events with a project, add the project ID to the script URL:
+
+```html
+<script src="http://localhost:4000/tracker.js?projectId=PROJECT_ID"></script>
+```
+
+To test from a separate website, serve the included `tracker-test` directory:
+
+```powershell
+cd tracker-test
+python -m http.server 8080
+```
+
+Open `http://localhost:8080`, interact with both pages, and inspect the browser Network panel for `/api/events`. With the default script URL, the backend creates a project for the test site's origin automatically. Every event from the same browser session shares one `sessionId` and includes the resolved `projectId`.
 
 ## MCP tools
 
