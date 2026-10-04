@@ -73,6 +73,16 @@ Services:
 The backend health route performs a Prisma `project.count()` query. Application routes use Prisma Client; they do not use raw SQL.
 The frontend checks both `/health` endpoints and displays backend, database, and MCP connectivity.
 
+## Dashboard
+
+The React dashboard is available at the frontend URL and reads project data from these Prisma-backed endpoints:
+
+- `GET /api/projects`
+- `GET /api/projects/:id/problems`
+- `GET /api/projects/:id/events`
+
+The current MVP derives repeated-click and potential dead-click signals from tracked events. Hesitation and backtracking remain visible in the overview but stay at zero until their detection rules are added to the friction engine.
+
 ## Website tracking
 
 The backend serves a lightweight tracker at `http://localhost:4000/tracker.js`. Add it to a demo website:
@@ -81,7 +91,7 @@ The backend serves a lightweight tracker at `http://localhost:4000/tracker.js`. 
 <script src="http://localhost:4000/tracker.js"></script>
 ```
 
-The tracker records `page_view`, `click`, `hover`, `scroll`, and `navigation` events and posts them to `/api/events`. To associate events with a project, add the project ID to the script URL:
+The tracker records `page_view`, `click`, `hover`, `scroll`, and `navigation` events and posts them to `/api/events`. It also emits one `repeated_click` event when the same interactive element is clicked at least three times within two seconds. To associate events with a project, add the project ID to the script URL:
 
 ```html
 <script src="http://localhost:4000/tracker.js?projectId=PROJECT_ID"></script>
