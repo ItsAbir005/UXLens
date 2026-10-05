@@ -6,12 +6,13 @@ datasource db {
   provider = "postgresql"
 }
 model Project {
-  id        String   @id @default(cuid())
-  name      String
-  website   String
-  createdAt DateTime @default(now())
-  sessions  Session[]
-  events    Event[]
+  id               String   @id @default(cuid())
+  name             String
+  website          String
+  ingestionKeyHash String?  @unique
+  createdAt        DateTime @default(now())
+  sessions         Session[]
+  events           Event[]
 }
 
 model Session {

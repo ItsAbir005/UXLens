@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
+    "project:key": "node scripts/generate-project-key.js",
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
     "prisma:migrate": "prisma migrate dev"

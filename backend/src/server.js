@@ -2,17 +2,69 @@ import express from "express";
 import { prisma } from "./db.js";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { hashIngestionKey } from "./project-key.js";
 
 const app = express();
 const port = process.env.PORT || 4000;
 const trackerPath = fileURLToPath(new URL("../public/tracker.js", import.meta.url));
 const eventTypes = new Set(["page_view", "click", "hover", "scroll", "navigation", "repeated_click"]);
 const problemTypes = ["repeated_click", "dead_click", "hesitation", "backtracking"];
+const eventRateLimit = 300;
+const eventRateWindowMs = 60_000;
+const eventRateBuckets = new Map();
 
-app.use(express.json());
+const bearerKey = (req) => {
+  const header = req.get("authorization");
+  if (typeof header !== "string") return null;
+  const match = header.match(/^Bearer\s+([^\s]+)$/i);
+  return match?.[1] || null;
+};
+
+const authenticateProject = async (req, res, expectedProjectId) => {
+  const key = bearerKey(req);
+  if (!key) {
+    res.status(401).json({ error: "project ingestion key is required" });
+    return null;
+  }
+
+  const project = await prisma.project.findUnique({
+    where: { ingestionKeyHash: hashIngestionKey(key) },
+    select: { id: true, name: true, website: true, createdAt: true }
+  });
+  if (!project || (expectedProjectId && project.id !== expectedProjectId)) {
+    res.status(403).json({ error: "project ingestion key is not valid for this project" });
+    return null;
+  }
+  return project;
+};
+
+const checkEventRateLimit = (projectId, res) => {
+  const now = Date.now();
+  const existing = eventRateBuckets.get(projectId);
+  const bucket = existing && now - existing.windowStartedAt < eventRateWindowMs
+    ? existing
+    : { windowStartedAt: now, count: 0 };
+
+  if (bucket.count >= eventRateLimit) {
+    const retryAfter = Math.max(1, Math.ceil((bucket.windowStartedAt + eventRateWindowMs - now) / 1000));
+    res.set("Retry-After", String(retryAfter));
+    res.status(429).json({ error: "event rate limit exceeded" });
+    return false;
+  }
+
+  eventRateBuckets.set(projectId, bucket);
+  return true;
+};
+
+const recordAcceptedEvent = (projectId) => {
+  const bucket = eventRateBuckets.get(projectId);
+  if (bucket) bucket.count += 1;
+};
+
+app.use(express.json({ limit: "32kb" }));
 app.use((_req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "Content-Type");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   if (_req.method === "OPTIONS") return res.sendStatus(204);
   next();
@@ -32,10 +84,11 @@ app.get("/health", async (_req, res) => {
   }
 });
 
-const listProjects = async (_req, res) => {
+const listProjects = async (req, res) => {
   try {
-    const projects = await prisma.project.findMany({ orderBy: { createdAt: "desc" } });
-    return res.json(projects);
+    const project = await authenticateProject(req, res);
+    if (!project) return;
+    return res.json([project]);
   } catch (error) {
     console.error("Project list failed", error);
     return res.status(500).json({ error: "could not load projects" });
@@ -45,13 +98,7 @@ const listProjects = async (_req, res) => {
 app.get(["/projects", "/api/projects"], listProjects);
 
 app.post("/projects", async (req, res) => {
-  const { name, website } = req.body;
-  if (typeof name !== "string" || typeof website !== "string" || !name || !website) {
-    return res.status(400).json({ error: "name and website are required" });
-  }
-
-  const project = await prisma.project.create({ data: { name, website } });
-  return res.status(201).json(project);
+  return res.status(401).json({ error: "project creation requires an authenticated management flow" });
 });
 
 const elementKey = (event) => {
@@ -245,7 +292,7 @@ const loadProject = async (projectId, res) => {
 
 app.get("/api/projects/:id/problems", async (req, res) => {
   try {
-    const project = await loadProject(req.params.id, res);
+    const project = await authenticateProject(req, res, req.params.id);
     if (!project) return;
     const events = await getProjectEvents(project.id);
     const problems = buildProblems(events);
@@ -262,7 +309,7 @@ app.get("/api/projects/:id/problems", async (req, res) => {
 
 app.get("/api/projects/:id/events", async (req, res) => {
   try {
-    const project = await loadProject(req.params.id, res);
+    const project = await authenticateProject(req, res, req.params.id);
     if (!project) return;
     const events = await getProjectEvents(project.id);
     const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : undefined;
@@ -278,10 +325,18 @@ app.post("/api/events", async (req, res) => {
   const { sessionId, type, page, timestamp, element = {}, metadata = {}, projectId } = req.body ?? {};
   const requestedProjectId = projectId || metadata.projectId;
 
+  if (typeof requestedProjectId !== "string" || !requestedProjectId) {
+    return res.status(400).json({ error: "projectId is required" });
+  }
+
+  const project = await authenticateProject(req, res, requestedProjectId);
+  if (!project) return;
+  if (!checkEventRateLimit(project.id, res)) return;
+
   if (
     typeof sessionId !== "string" || !sessionId ||
     typeof type !== "string" || !eventTypes.has(type) ||
-    typeof page !== "string" || !page ||
+    typeof page !== "string" || !page || page.length > 2048 ||
     typeof timestamp !== "number" || !Number.isFinite(timestamp) ||
     !Number.isFinite(new Date(timestamp).getTime()) ||
     typeof element !== "object" || element === null || Array.isArray(element) ||
@@ -290,29 +345,18 @@ app.post("/api/events", async (req, res) => {
     return res.status(400).json({ error: "sessionId, type, page, timestamp, element, and metadata are required" });
   }
 
+  recordAcceptedEvent(project.id);
+
   try {
-    let sessionProjectId = typeof requestedProjectId === "string" ? requestedProjectId : undefined;
-    const origin = typeof metadata.origin === "string" ? metadata.origin : undefined;
-
-    if (sessionProjectId) {
-      const project = await prisma.project.findUnique({ where: { id: sessionProjectId } });
-      if (!project) return res.status(400).json({ error: "projectId does not exist" });
-    } else if (origin) {
-      const project = await prisma.project.findFirst({ where: { website: origin } }) || await prisma.project.create({
-        data: { name: origin, website: origin }
-      });
-      sessionProjectId = project.id;
-    }
-
     const session = await prisma.session.upsert({
       where: { id: sessionId },
-      create: { id: sessionId, projectId: sessionProjectId || undefined },
-      update: { projectId: sessionProjectId || undefined }
+      create: { id: sessionId, projectId: project.id },
+      update: { projectId: project.id }
     });
     const event = await prisma.event.create({
       data: {
         sessionId: session.id,
-        projectId: sessionProjectId,
+        projectId: project.id,
         type,
         page,
         timestamp: new Date(timestamp),
