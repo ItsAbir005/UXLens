@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>UXLens Extension Settings</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main>
+      <h1>UXLens Extension</h1>
+      <p>Configure where privacy-safe interaction evidence should be sent.</p>
+      <form id="settings-form">
+        <label for="backend-url">Backend URL</label>
+        <input id="backend-url" name="backendUrl" type="url" required>
+        <label for="project-id">UXLens project ID</label>
+        <input id="project-id" name="projectId" type="text" required>
+        <label for="ingestion-key">Project ingestion key</label>
+        <input id="ingestion-key" name="ingestionKey" type="password" autocomplete="off" required>
+        <button type="submit">Save configuration</button>
+        <button id="clear-button" type="button">Clear configuration</button>
+        <p id="status" role="status" aria-live="polite"></p>
+      </form>
+    </main>
+    <script src="../src/config.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>

@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "UXLens Privacy-First Collector",
+  "version": "0.1.0",
+  "description": "Collects privacy-safe UX interaction evidence for a configured UXLens project.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*",
+    "http://localhost:4000/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["src/event-sanitizer.js", "src/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options/options.html"
+}

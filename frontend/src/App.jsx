@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 
 const backendUrl = import.meta.env.VITE_BACKEND_URL || "http://localhost:4000";
+const backendHeaders = import.meta.env.VITE_PROJECT_INGESTION_KEY
+  ? { Authorization: `Bearer ${import.meta.env.VITE_PROJECT_INGESTION_KEY}` }
+  : {};
 const problemCards = [
   { type: "repeated_click", label: "Repeated clicks", tone: "red" },
   { type: "dead_click", label: "Dead clicks", tone: "orange" },
@@ -9,7 +12,7 @@ const problemCards = [
 ];
 
 const readJson = async (url) => {
-  const response = await fetch(url);
+  const response = await fetch(url, { headers: backendHeaders });
   if (!response.ok) throw new Error("The dashboard could not load this data.");
   return response.json();
 };

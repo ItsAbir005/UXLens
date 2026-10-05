@@ -108,7 +108,9 @@ Open `http://localhost:8080`, interact with both pages, and inspect the browser 
 
 ## MCP tools
 
-The MCP server exposes `ping` and `get_latest_workflow`. The latter accepts `owner` and `repo` and reads the latest GitHub Actions run. Set `GITHUB_TOKEN` in `mcp-server/.env` for private repositories or higher GitHub API limits.
+The MCP server proxies the backend API and exposes `get_ux_summary`, `get_ux_problems`, `get_problem_details`, and `get_session_timeline`, plus the `ping` health tool. Set `BACKEND_URL` in `mcp-server/.env` when the backend is not running at `http://localhost:4000`. MCP does not access Prisma or duplicate friction detection logic.
+
+Project event ingestion and project-scoped reads require a project ingestion key. Generate one locally with `npm --prefix backend run project:key -- PROJECT_ID`, then provide the one-time displayed key to the extension. The raw key is not stored in PostgreSQL.
 
 ## Database
 
