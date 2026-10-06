@@ -12,7 +12,7 @@
   };
 
   const readConfig = async () => {
-    const config = await chrome.storage.local.get({ backendUrl: defaultBackendUrl, projectId: "" });
+    const config = await chrome.storage.local.get({ backendUrl: defaultBackendUrl, projectId: "", ingestionKey: "" });
     return {
       backendUrl: normalizeBackendUrl(config.backendUrl),
       projectId: String(config.projectId || "").trim(),
