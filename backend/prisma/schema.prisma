@@ -9,6 +9,7 @@ model Project {
   id               String   @id @default(cuid())
   name             String
   website          String
+  websiteOrigin    String?  @unique
   ingestionKeyHash String?  @unique
   createdAt        DateTime @default(now())
   sessions         Session[]

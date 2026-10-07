@@ -2,6 +2,7 @@ import express from "express";
 import { prisma } from "./db.js";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import crypto from "node:crypto";
 import { hashIngestionKey } from "./project-key.js";
 
 const app = express();
@@ -86,9 +87,8 @@ app.get("/health", async (_req, res) => {
 
 const listProjects = async (req, res) => {
   try {
-    const project = await authenticateProject(req, res);
-    if (!project) return;
-    return res.json([project]);
+    const projects = await prisma.project.findMany({ orderBy: { createdAt: 'desc' } });
+    return res.json(projects);
   } catch (error) {
     console.error("Project list failed", error);
     return res.status(500).json({ error: "could not load projects" });
@@ -292,7 +292,7 @@ const loadProject = async (projectId, res) => {
 
 app.get("/api/projects/:id/problems", async (req, res) => {
   try {
-    const project = await authenticateProject(req, res, req.params.id);
+    const project = await loadProject(req.params.id, res);
     if (!project) return;
     const events = await getProjectEvents(project.id);
     const problems = buildProblems(events);
@@ -300,7 +300,9 @@ app.get("/api/projects/:id/problems", async (req, res) => {
       type,
       problems.filter((problem) => problem.type === type).reduce((total, problem) => total + problem.occurrences, 0)
     ]));
-    return res.json({ project, summary, problems });
+    const totalEvents = events.length;
+    const totalSessions = new Set(events.map(e => e.sessionId)).size;
+    return res.json({ project, summary, problems, totalEvents, totalSessions });
   } catch (error) {
     console.error("Problem query failed", error);
     return res.status(500).json({ error: "could not load problems" });
@@ -309,7 +311,7 @@ app.get("/api/projects/:id/problems", async (req, res) => {
 
 app.get("/api/projects/:id/events", async (req, res) => {
   try {
-    const project = await authenticateProject(req, res, req.params.id);
+    const project = await loadProject(req.params.id, res);
     if (!project) return;
     const events = await getProjectEvents(project.id);
     const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : undefined;
@@ -318,6 +320,83 @@ app.get("/api/projects/:id/events", async (req, res) => {
   } catch (error) {
     console.error("Event query failed", error);
     return res.status(500).json({ error: "could not load events" });
+  }
+});
+
+const siteResolveBuckets = new Map();
+const resolveRateLimit = 10;
+const resolveRateWindowMs = 60 * 1000;
+
+const checkSiteResolveRateLimit = (ip, res) => {
+  const now = Date.now();
+  const existing = siteResolveBuckets.get(ip);
+  const bucket = existing && now - existing.windowStartedAt < resolveRateWindowMs
+    ? existing
+    : { windowStartedAt: now, count: 0 };
+  
+  if (bucket.count >= resolveRateLimit) {
+    res.status(429).json({ error: "site resolve rate limit exceeded" });
+    return false;
+  }
+  bucket.count += 1;
+  siteResolveBuckets.set(ip, bucket);
+  return true;
+};
+
+app.post("/api/sites/resolve", async (req, res) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  if (!checkSiteResolveRateLimit(ip, res)) return;
+
+  const { origin } = req.body ?? {};
+  if (typeof origin !== "string" || !origin) {
+    return res.status(400).json({ error: "origin is required" });
+  }
+
+  let normalizedOrigin;
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error();
+    normalizedOrigin = url.origin;
+  } catch (err) {
+    return res.status(400).json({ error: "invalid origin" });
+  }
+
+  try {
+    let project = await prisma.project.findUnique({ where: { websiteOrigin: normalizedOrigin } });
+    
+    // Migrate existing projects (e.g. Tracker Test Website)
+    if (!project) {
+      const existingUnlinked = await prisma.project.findFirst({ 
+        where: { website: normalizedOrigin, websiteOrigin: null } 
+      });
+      if (existingUnlinked) {
+        project = await prisma.project.update({ 
+          where: { id: existingUnlinked.id }, 
+          data: { websiteOrigin: normalizedOrigin } 
+        });
+      }
+    }
+
+    if (project) {
+      return res.json({ id: project.id });
+    }
+
+    const rawKey = crypto.randomBytes(32).toString("hex");
+    const hashedKey = hashIngestionKey(rawKey);
+
+    project = await prisma.project.create({
+      data: {
+        name: normalizedOrigin,
+        website: normalizedOrigin,
+        websiteOrigin: normalizedOrigin,
+        ingestionKeyHash: hashedKey
+      }
+    });
+
+    return res.status(201).json({ id: project.id, ingestionKey: rawKey });
+  } catch (error) {
+    console.error("Site resolve failed", error);
+    return res.status(500).json({ error: "could not resolve site" });
   }
 });
 

@@ -22,29 +22,47 @@ async function removeTabSessions(tabId) {
 }
 
 async function sendToBackend(event) {
+  const headers = { "Content-Type": "application/json" };
+  if (event.ingestionKey) {
+    headers.Authorization = `Bearer ${event.ingestionKey}`;
+  }
   return fetch(`${event.backendUrl}/api/events`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${event.ingestionKey}`
-    },
+    headers,
     body: JSON.stringify(event.payload)
   });
 }
 
+const getOrigin = (url) => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+};
+
 async function handleEvent(message, sender) {
   const tabId = sender.tab?.id;
-  if (typeof tabId !== "number" || !message?.event) return;
+  const origin = getOrigin(sender.tab?.url);
+  if (typeof tabId !== "number" || !message?.event || !origin) return;
+  
   const config = await UXLensConfig.readConfig();
-  if (!config.projectId || !config.ingestionKey) return;
+  let siteConfig;
+  try {
+    siteConfig = await UXLensConfig.resolveSite(origin, config.backendUrl);
+  } catch (e) {
+    return;
+  }
+  if (!siteConfig.projectId) return;
 
-  const sessionId = await getSessionId(tabId, config.projectId);
+  const sessionId = await getSessionId(tabId, siteConfig.projectId);
   const currentPage = message.event.page || "/";
-  const pageKey = `${sessionStoragePrefix}page:${tabId}:${config.projectId}`;
+  const pageKey = `${sessionStoragePrefix}page:${tabId}:${siteConfig.projectId}`;
   const previousPage = (await sessionStorageArea().get(pageKey))[pageKey];
+  
   const basePayload = {
     sessionId,
-    projectId: config.projectId,
+    projectId: siteConfig.projectId,
     type: message.event.type,
     page: currentPage,
     timestamp: Number.isFinite(message.event.timestamp) ? message.event.timestamp : Date.now(),
@@ -58,17 +76,24 @@ async function handleEvent(message, sender) {
       type: "navigation",
       element: {},
       metadata: { source: "extension", from: previousPage, to: currentPage }
-    }, (payload) => sendToBackend({ backendUrl: config.backendUrl, ingestionKey: config.ingestionKey, payload }));
+    }, (payload) => sendToBackend({ backendUrl: config.backendUrl, ingestionKey: siteConfig.ingestionKey, payload }));
   }
 
   await sessionStorageArea().set({ [pageKey]: currentPage });
-  UXLensEventQueue.enqueue(basePayload, (payload) => sendToBackend({ backendUrl: config.backendUrl, ingestionKey: config.ingestionKey, payload }));
+  UXLensEventQueue.enqueue(basePayload, (payload) => sendToBackend({ backendUrl: config.backendUrl, ingestionKey: siteConfig.ingestionKey, payload }));
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "configuration-status") {
+    const origin = getOrigin(sender.tab?.url);
+    if (!origin) {
+      sendResponse({ configured: false });
+      return false;
+    }
+    
     UXLensConfig.readConfig()
-      .then(({ projectId, ingestionKey }) => sendResponse({ configured: Boolean(projectId && ingestionKey) }))
+      .then(config => UXLensConfig.resolveSite(origin, config.backendUrl))
+      .then(siteConfig => sendResponse({ configured: Boolean(siteConfig && siteConfig.projectId) }))
       .catch(() => sendResponse({ configured: false }));
     return true;
   }
