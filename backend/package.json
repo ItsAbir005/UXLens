@@ -16,10 +16,11 @@
     "@prisma/client": "^7.0.0",
     "dotenv": "^17.2.2",
     "express": "^5.1.0",
-    "pg": "^8.16.3",
+    "pg": "^8.23.1",
     "uxlens": "file:.."
   },
   "devDependencies": {
+    "@types/node": "^26.6.4",
     "prisma": "^7.0.0"
   }
 }

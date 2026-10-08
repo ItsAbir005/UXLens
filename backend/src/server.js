@@ -28,10 +28,23 @@ const authenticateProject = async (req, res, expectedProjectId) => {
     return null;
   }
 
-  const project = await prisma.project.findUnique({
-    where: { ingestionKeyHash: hashIngestionKey(key) },
-    select: { id: true, name: true, website: true, createdAt: true }
+  const hashedKey = hashIngestionKey(key);
+
+  const credential = await prisma.projectCredential.findUnique({
+    where: { ingestionKeyHash: hashedKey },
+    include: { project: { select: { id: true, name: true, website: true, createdAt: true } } }
   });
+
+  let project = null;
+  if (credential && !credential.revokedAt) {
+    project = credential.project;
+  } else {
+    project = await prisma.project.findFirst({
+      where: { ingestionKeyHash: hashedKey },
+      select: { id: true, name: true, website: true, createdAt: true }
+    });
+  }
+
   if (!project || (expectedProjectId && project.id !== expectedProjectId)) {
     res.status(403).json({ error: "project ingestion key is not valid for this project" });
     return null;
@@ -383,7 +396,9 @@ app.post("/api/sites/analyze", async (req, res) => {
           name: normalizedOrigin,
           website: normalizedOrigin,
           websiteOrigin: normalizedOrigin,
-          ingestionKeyHash: hashIngestionKey(rawKey)
+          credentials: {
+            create: { ingestionKeyHash: hashIngestionKey(rawKey) }
+          }
         }
       });
     }
@@ -435,9 +450,11 @@ app.post("/api/sites/resolve", async (req, res) => {
       if (windowExpires && Date.now() < windowExpires) {
         // Pairing window is open, generate a new key and give it to the extension
         const rawKey = crypto.randomBytes(32).toString("hex");
-        await prisma.project.update({
-          where: { id: project.id },
-          data: { ingestionKeyHash: hashIngestionKey(rawKey) }
+        await prisma.projectCredential.create({
+          data: {
+            projectId: project.id,
+            ingestionKeyHash: hashIngestionKey(rawKey)
+          }
         });
         pairingWindows.delete(project.id);
         return res.json({ id: project.id, ingestionKey: rawKey });
@@ -453,7 +470,9 @@ app.post("/api/sites/resolve", async (req, res) => {
         name: normalizedOrigin,
         website: normalizedOrigin,
         websiteOrigin: normalizedOrigin,
-        ingestionKeyHash: hashedKey
+        credentials: {
+          create: { ingestionKeyHash: hashedKey }
+        }
       }
     });
 

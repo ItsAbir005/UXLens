@@ -10,10 +10,23 @@ model Project {
   name             String
   website          String
   websiteOrigin    String?  @unique
-  ingestionKeyHash String?  @unique
+  ingestionKeyHash String?  @unique // Legacy field, preserved for compatibility
   createdAt        DateTime @default(now())
   sessions         Session[]
   events           Event[]
+  credentials      ProjectCredential[]
+}
+
+model ProjectCredential {
+  id               String    @id @default(cuid())
+  projectId        String
+  project          Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ingestionKeyHash String    @unique
+  revokedAt        DateTime?
+  expiresAt        DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@index([projectId])
 }
 
 model Session {
