@@ -343,6 +343,59 @@ const checkSiteResolveRateLimit = (ip, res) => {
   return true;
 };
 
+const pairingWindows = new Map();
+
+app.post("/api/sites/analyze", async (req, res) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  if (!checkSiteResolveRateLimit(ip, res)) return;
+
+  const { origin } = req.body ?? {};
+  if (typeof origin !== "string" || !origin) return res.status(400).json({ error: "origin is required" });
+
+  let normalizedOrigin;
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error();
+    normalizedOrigin = url.origin;
+  } catch (err) {
+    return res.status(400).json({ error: "invalid origin" });
+  }
+
+  try {
+    let project = await prisma.project.findUnique({ where: { websiteOrigin: normalizedOrigin } });
+    
+    if (!project) {
+      const existingUnlinked = await prisma.project.findFirst({ 
+        where: { website: normalizedOrigin, websiteOrigin: null } 
+      });
+      if (existingUnlinked) {
+        project = await prisma.project.update({ 
+          where: { id: existingUnlinked.id }, 
+          data: { websiteOrigin: normalizedOrigin } 
+        });
+      }
+    }
+
+    if (!project) {
+      const rawKey = crypto.randomBytes(32).toString("hex");
+      project = await prisma.project.create({
+        data: {
+          name: normalizedOrigin,
+          website: normalizedOrigin,
+          websiteOrigin: normalizedOrigin,
+          ingestionKeyHash: hashIngestionKey(rawKey)
+        }
+      });
+    }
+    
+    pairingWindows.set(project.id, Date.now() + 60000);
+    return res.json({ id: project.id, name: project.name, website: project.website });
+  } catch (error) {
+    console.error("Site analyze failed", error);
+    return res.status(500).json({ error: "could not analyze site" });
+  }
+});
+
 app.post("/api/sites/resolve", async (req, res) => {
   const ip = req.ip || req.connection.remoteAddress;
   if (!checkSiteResolveRateLimit(ip, res)) return;
@@ -378,6 +431,17 @@ app.post("/api/sites/resolve", async (req, res) => {
     }
 
     if (project) {
+      const windowExpires = pairingWindows.get(project.id);
+      if (windowExpires && Date.now() < windowExpires) {
+        // Pairing window is open, generate a new key and give it to the extension
+        const rawKey = crypto.randomBytes(32).toString("hex");
+        await prisma.project.update({
+          where: { id: project.id },
+          data: { ingestionKeyHash: hashIngestionKey(rawKey) }
+        });
+        pairingWindows.delete(project.id);
+        return res.json({ id: project.id, ingestionKey: rawKey });
+      }
       return res.json({ id: project.id });
     }
 

@@ -29,7 +29,7 @@
   const resolveSite = async (origin, backendUrl) => {
     const cacheKey = `site_${origin}`;
     const cached = await chrome.storage.local.get(cacheKey);
-    if (cached[cacheKey]) return cached[cacheKey];
+    if (cached[cacheKey] && cached[cacheKey].ingestionKey) return cached[cacheKey];
 
     const response = await fetch(`${backendUrl}/api/sites/resolve`, {
       method: "POST",
