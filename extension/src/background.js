@@ -41,6 +41,15 @@ const getOrigin = (url) => {
   }
 };
 
+const DEBUG = true;
+
+UXLensEventQueue.setHandler(async (eventObj) => {
+  if (DEBUG) console.log("Sending event to backend:", eventObj.payload.type);
+  const response = await sendToBackend(eventObj);
+  if (DEBUG) console.log("HTTP Status for", eventObj.payload.type, ":", response.status);
+  return response;
+});
+
 async function handleEvent(message, sender) {
   const tabId = sender.tab?.id;
   const origin = getOrigin(sender.tab?.url);
@@ -51,9 +60,12 @@ async function handleEvent(message, sender) {
   try {
     siteConfig = await UXLensConfig.resolveSite(origin, config.backendUrl);
   } catch (e) {
+    if (e.code !== "NOT_REGISTERED" && e.code !== "COOLED_DOWN") {
+      console.warn("UXLens event handling aborted: resolution failed:", e.message);
+    }
     return;
   }
-  if (!siteConfig.projectId) return;
+  if (!siteConfig || !siteConfig.projectId || !siteConfig.ingestionKey) return;
 
   const sessionId = await getSessionId(tabId, siteConfig.projectId);
   const currentPage = message.event.page || "/";
@@ -71,16 +83,26 @@ async function handleEvent(message, sender) {
   };
 
   if (message.event.type === "page_view" && previousPage && previousPage !== currentPage) {
+    if (DEBUG) console.log("Enqueuing navigation event:", siteConfig.projectId);
     UXLensEventQueue.enqueue({
-      ...basePayload,
-      type: "navigation",
-      element: {},
-      metadata: { source: "extension", from: previousPage, to: currentPage }
-    }, (payload) => sendToBackend({ backendUrl: config.backendUrl, ingestionKey: siteConfig.ingestionKey, payload }));
+      backendUrl: config.backendUrl,
+      ingestionKey: siteConfig.ingestionKey,
+      payload: {
+        ...basePayload,
+        type: "navigation",
+        element: {},
+        metadata: { source: "extension", from: previousPage, to: currentPage }
+      }
+    });
   }
 
   await sessionStorageArea().set({ [pageKey]: currentPage });
-  UXLensEventQueue.enqueue(basePayload, (payload) => sendToBackend({ backendUrl: config.backendUrl, ingestionKey: siteConfig.ingestionKey, payload }));
+  if (DEBUG) console.log("Enqueuing base event:", siteConfig.projectId, basePayload.type);
+  UXLensEventQueue.enqueue({
+    backendUrl: config.backendUrl,
+    ingestionKey: siteConfig.ingestionKey,
+    payload: basePayload
+  });
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -88,16 +110,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const origin = getOrigin(sender.tab?.url);
     if (!origin) {
       sendResponse({ configured: false });
-      return false;
+      return false; // synchronous response
     }
     
     UXLensConfig.readConfig()
       .then(config => UXLensConfig.resolveSite(origin, config.backendUrl))
-      .then(siteConfig => sendResponse({ configured: Boolean(siteConfig && siteConfig.projectId) }))
-      .catch(() => sendResponse({ configured: false }));
-    return true;
+      .then(siteConfig => {
+        sendResponse({ configured: Boolean(siteConfig && siteConfig.projectId && siteConfig.ingestionKey) });
+      })
+      .catch((e) => {
+        if (e.code !== "NOT_REGISTERED" && e.code !== "COOLED_DOWN") {
+          console.warn("UXLens configuration failed:", e.message);
+        }
+        sendResponse({ configured: false });
+      });
+    return true; // asynchronous response
   }
-  if (message?.type === "uxlens-event") void handleEvent(message, sender);
+  if (message?.type === "uxlens-event") {
+    if (DEBUG) console.log("Received event from content script:", message.event?.type);
+    handleEvent(message, sender).catch(e => {
+      if (e.code !== "NOT_REGISTERED" && e.code !== "COOLED_DOWN") {
+        console.warn("UXLens handleEvent error:", e.message || e);
+      }
+    });
+  }
   return false;
 });
 

@@ -10,7 +10,7 @@ const port = process.env.PORT || 4000;
 const trackerPath = fileURLToPath(new URL("../public/tracker.js", import.meta.url));
 const eventTypes = new Set(["page_view", "click", "hover", "scroll", "navigation", "repeated_click"]);
 const problemTypes = ["repeated_click", "dead_click", "hesitation", "backtracking"];
-const eventRateLimit = 300;
+const eventRateLimit = 1000;
 const eventRateWindowMs = 60_000;
 const eventRateBuckets = new Map();
 

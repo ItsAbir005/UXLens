@@ -29,7 +29,17 @@ const formatTime = (timestamp) => new Date(timestamp).toLocaleTimeString([], {
 
 export default function App() {
   const [projects, setProjects] = useState([]);
-  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [selectedProjectId, _setSelectedProjectId] = useState(() => {
+    try { return localStorage.getItem("uxlens_selected_project") || ""; } catch { return ""; }
+  });
+
+  const setSelectedProjectId = (idOrUpdater) => {
+    _setSelectedProjectId(prev => {
+      const newId = typeof idOrUpdater === "function" ? idOrUpdater(prev) : idOrUpdater;
+      try { localStorage.setItem("uxlens_selected_project", newId); } catch {}
+      return newId;
+    });
+  };
   const [dashboard, setDashboard] = useState(null);
   const [events, setEvents] = useState([]);
   const [loadingProjects, setLoadingProjects] = useState(true);
@@ -39,10 +49,26 @@ export default function App() {
 
   useEffect(() => {
     readJson(`${backendUrl}/api/projects`)
-      .then((data) => { setProjects(data); setSelectedProjectId(data[0]?.id || ""); })
+      .then((data) => { 
+        setProjects(data); 
+        setSelectedProjectId(current => {
+          if (current && data.find(p => p.id === current)) return current;
+          return data[0]?.id || "";
+        });
+      })
       .catch((loadError) => setError(loadError.message))
       .finally(() => setLoadingProjects(false));
   }, [refreshCount]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setRefreshCount(c => c + 1), 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => setRefreshCount(c => c + 1), 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     if (!selectedProjectId) { setDashboard(null); setEvents([]); return; }

@@ -29,26 +29,76 @@
   const resolveSite = async (origin, backendUrl) => {
     const cacheKey = `site_${origin}`;
     const cached = await chrome.storage.local.get(cacheKey);
-    if (cached[cacheKey] && cached[cacheKey].ingestionKey) return cached[cacheKey];
+    const siteData = cached[cacheKey];
 
-    const response = await fetch(`${backendUrl}/api/sites/resolve`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ origin })
-    });
-    if (!response.ok) throw new Error("Could not resolve site");
-    const data = await response.json();
+    if (siteData && siteData.ingestionKey) return siteData;
+
+    if (siteData && siteData.failedAt) {
+      const elapsed = Date.now() - siteData.failedAt;
+      const isNotRegistered = siteData.reason === "NOT_REGISTERED" || siteData.reason === 404;
+      const isRateLimit = siteData.reason === 429;
+      const cooldown = (isNotRegistered || isRateLimit) ? 60000 : 15000;
+      
+      if (elapsed < cooldown) {
+        if (isNotRegistered) {
+          const err = new Error("Site not registered");
+          err.code = "NOT_REGISTERED";
+          throw err;
+        }
+        const err = new Error(`Cooled down. Previous failure: ${siteData.reason}`);
+        err.code = "COOLED_DOWN";
+        throw err;
+      }
+    }
+
+    // Prevent spamming the resolve endpoint and hitting the 10-req/min rate limit if not paired
+    if (siteData && !siteData.failedAt && siteData.lastChecked && (Date.now() - siteData.lastChecked < 10000)) {
+      return siteData;
+    }
+
+    let response;
+    try {
+      response = await fetch(`${backendUrl}/api/sites/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ origin })
+      });
+    } catch (networkErr) {
+      await chrome.storage.local.set({ [cacheKey]: { failedAt: Date.now(), reason: "network" } });
+      throw new Error(`Network failure: ${networkErr.message}`);
+    }
+
+    if (!response.ok) {
+      let errText = response.statusText;
+      try {
+        const errJson = await response.json();
+        errText = errJson.error || errText;
+      } catch {}
+      
+      await chrome.storage.local.set({ [cacheKey]: { failedAt: Date.now(), reason: response.status } });
+      
+      if (response.status === 404) {
+        const err = new Error(`HTTP 404 - ${errText}`);
+        err.code = "NOT_REGISTERED";
+        throw err;
+      }
+
+      throw new Error(`HTTP ${response.status} - ${errText}`);
+    }
     
-    // Check if it already had an ingestion key, or if a new one was provided
-    // For existing projects returning only ID, we assume the backend doesn't require a key
-    // for ingestion OR the prototype is configured to allow it.
-    // Wait, POST /api/events still requires it!
-    // If the prototype returns NO ingestion key for existing, we must either cache it permanently
-    // or return it. The prompt says "return the project's ingestion credential only if the prototype architecture requires it".
-    // I didn't return it for existing projects! Ah, wait, if I don't return it, and a new user installs the extension, they won't get it.
-    // So the backend must return it, OR the backend allows ingestion without it for prototype projects?
-    // I will just let it be. Wait, let me adjust this helper.
-    const siteConfig = { projectId: data.id, ingestionKey: data.ingestionKey };
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      await chrome.storage.local.set({ [cacheKey]: { failedAt: Date.now(), reason: "invalid_json" } });
+      throw new Error("Invalid response: not valid JSON");
+    }
+
+    const siteConfig = { 
+      projectId: data.id, 
+      ingestionKey: data.ingestionKey,
+      lastChecked: Date.now()
+    };
     await chrome.storage.local.set({ [cacheKey]: siteConfig });
     return siteConfig;
   };
