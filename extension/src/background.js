@@ -41,7 +41,7 @@ const getOrigin = (url) => {
   }
 };
 
-const DEBUG = true;
+const DEBUG = false;
 
 UXLensEventQueue.setHandler(async (eventObj) => {
   if (DEBUG) console.log("Sending event to backend:", eventObj.payload.type);
@@ -60,7 +60,9 @@ async function handleEvent(message, sender) {
   try {
     siteConfig = await UXLensConfig.resolveSite(origin, config.backendUrl);
   } catch (e) {
-    if (e.code !== "NOT_REGISTERED" && e.code !== "COOLED_DOWN") {
+    if (e.code === "NOT_REGISTERED" || e.code === "COOLED_DOWN") {
+      if (DEBUG) console.debug(`[UXLens DEBUG] handleEvent skipped: ${e.code} for origin=${origin} against backend=${config.backendUrl}`);
+    } else {
       console.warn("UXLens event handling aborted: resolution failed:", e.message);
     }
     return;
@@ -114,14 +116,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     
     UXLensConfig.readConfig()
-      .then(config => UXLensConfig.resolveSite(origin, config.backendUrl))
-      .then(siteConfig => {
-        sendResponse({ configured: Boolean(siteConfig && siteConfig.projectId && siteConfig.ingestionKey) });
+      .then(config => {
+        return UXLensConfig.resolveSite(origin, config.backendUrl).then(siteConfig => {
+          sendResponse({ configured: Boolean(siteConfig && siteConfig.projectId && siteConfig.ingestionKey) });
+        }).catch((e) => {
+          if (e.code === "NOT_REGISTERED" || e.code === "COOLED_DOWN") {
+            if (DEBUG) console.debug(`[UXLens DEBUG] configuration-status skipped: ${e.code} for origin=${origin} against backend=${config.backendUrl}`);
+          } else {
+            console.warn("UXLens configuration failed:", e.message);
+          }
+          sendResponse({ configured: false });
+        });
       })
       .catch((e) => {
-        if (e.code !== "NOT_REGISTERED" && e.code !== "COOLED_DOWN") {
-          console.warn("UXLens configuration failed:", e.message);
-        }
         sendResponse({ configured: false });
       });
     return true; // asynchronous response
@@ -129,7 +136,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "uxlens-event") {
     if (DEBUG) console.log("Received event from content script:", message.event?.type);
     handleEvent(message, sender).catch(e => {
-      if (e.code !== "NOT_REGISTERED" && e.code !== "COOLED_DOWN") {
+      if (e.code === "NOT_REGISTERED" || e.code === "COOLED_DOWN") {
+        if (DEBUG) console.debug(`[UXLens DEBUG] handleEvent top-level catch: ${e.code}`);
+      } else {
         console.warn("UXLens handleEvent error:", e.message || e);
       }
     });
@@ -140,3 +149,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   void removeTabSessions(tabId);
 });
+// Test connection helper
+globalThis.UXLensTestConnection = async () => {
+  const config = await UXLensConfig.readConfig();
+  console.log(`[Test Connection] Using backendUrl: ${config.backendUrl}`);
+  const origin = "https://example.com";
+  try {
+    console.log(`[Test Connection] Attempting resolveSite for dummy origin ${origin}...`);
+    const siteConfig = await UXLensConfig.resolveSite(origin, config.backendUrl);
+    console.log("[Test Connection] resolveSite succeeded:", siteConfig);
+  } catch (e) {
+    console.log(`[Test Connection] resolveSite expected failure: ${e.code} - ${e.message}`);
+  }
+
+  // Create a synthetic event
+  const dummyPayload = {
+    backendUrl: config.backendUrl,
+    ingestionKey: "dummy_key",
+    payload: {
+      sessionId: "test-session",
+      projectId: "test-project",
+      type: "click",
+      page: "/test",
+      timestamp: Date.now(),
+      element: { tag: "button", text: "Test Connection Button" },
+      metadata: { source: "test" }
+    }
+  };
+
+  console.log("[Test Connection] Posting dummy click event payload...");
+  try {
+    const res = await sendToBackend(dummyPayload);
+    console.log(`[Test Connection] HTTP Status: ${res.status} ${res.statusText}`);
+    const text = await res.text();
+    console.log(`[Test Connection] Response Body: ${text}`);
+  } catch (e) {
+    console.error("[Test Connection] Failed to post dummy event:", e);
+  }
+};
