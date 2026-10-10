@@ -1,157 +1,314 @@
-﻿import express from "express";
-import crypto from "crypto";
-import { PrismaClient } from "@prisma/client";
+import express from "express";
+import { prisma } from "./db.js";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import crypto from "node:crypto";
+import { hashIngestionKey } from "./project-key.js";
 
 const app = express();
 const port = process.env.PORT || 4000;
-const prisma = new PrismaClient();
+const trackerPath = fileURLToPath(new URL("../public/tracker.js", import.meta.url));
+const eventTypes = new Set(["page_view", "click", "hover", "scroll", "navigation", "repeated_click"]);
+const problemTypes = ["repeated_click", "dead_click", "hesitation", "backtracking"];
+const eventRateLimit = 1000;
+const eventRateWindowMs = 60_000;
+const eventRateBuckets = new Map();
 
-app.set("trust proxy", 1);
-app.use(express.json());
-
-// Enable CORS for frontend
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
-
-// Request logger for specific routes
-app.use((req, res, next) => {
-  if (req.path === "/api/sites/analyze" || req.path === "/api/sites/resolve" || req.path === "/api/events") {
-    const start = Date.now();
-    const originalSend = res.send;
-    res.send = function (body) {
-      res.locals.body = body;
-      originalSend.call(this, body);
-    };
-    res.on("finish", () => {
-      const ms = Date.now() - start;
-      const origin = req.body?.origin || req.body?.projectId || req.params?.id || "-";
-      console.log(`[HTTP] ${new Date().toISOString()} ${req.method} ${req.path} | IP: ${req.ip} | Target: ${origin} | Status: ${res.statusCode} | ${ms}ms`);
-    });
-  }
-  next();
-});
-
-const hashIngestionKey = (key) => crypto.createHash("sha256").update(key).digest("hex");
-
-const authenticateProject = async (req, res, requestedProjectId) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
-    res.status(401).json({ error: "missing or invalid authorization header" });
-    console.log(`[AUTH FAIL] projectId=${requestedProjectId}: missing/invalid header`);
-    return null;
-  }
-  
-  const token = authHeader.split(" ")[1];
-  const hashedToken = hashIngestionKey(token);
-
-  try {
-    const credential = await prisma.projectCredential.findUnique({
-      where: { ingestionKeyHash: hashedToken },
-      include: { project: true }
-    });
-
-    if (!credential) {
-      res.status(401).json({ error: "invalid ingestion key" });
-      console.log(`[AUTH FAIL] projectId=${requestedProjectId}: invalid ingestion key`);
-      return null;
-    }
-    
-    if (credential.revokedAt) {
-      res.status(403).json({ error: "ingestion key revoked" });
-      console.log(`[AUTH FAIL] projectId=${requestedProjectId}: ingestion key revoked`);
-      return null;
-    }
-    
-    if (credential.projectId !== requestedProjectId) {
-      res.status(403).json({ error: "ingestion key not valid for this project" });
-      console.log(`[AUTH FAIL] projectId=${requestedProjectId}: ingestion key belongs to different project (${credential.projectId})`);
-      return null;
-    }
-
-    await prisma.projectCredential.update({
-      where: { id: credential.id },
-      data: { lastUsedAt: new Date() }
-    });
-    
-    return credential.project;
-  } catch (error) {
-    console.error("Authentication failed", error);
-    res.status(500).json({ error: "internal server error during authentication" });
-    return null;
-  }
+const bearerKey = (req) => {
+  const header = req.get("authorization");
+  if (typeof header !== "string") return null;
+  const match = header.match(/^Bearer\s+([^\s]+)$/i);
+  return match?.[1] || null;
 };
 
-const problemTypes = ["repeated_click", "rapid_navigation"];
-const eventTypes = new Set(["page_view", "click", "hover", "scroll", "navigation", "repeated_click"]);
-const eventRateLimitBuckets = new Map();
-const eventRateLimit = 1000;
-const eventRateWindowMs = 60 * 1000;
+const authenticateProject = async (req, res, expectedProjectId) => {
+  const key = bearerKey(req);
+  if (!key) {
+    res.status(401).json({ error: "project ingestion key is required" });
+    return null;
+  }
+
+  const hashedKey = hashIngestionKey(key);
+
+  const credential = await prisma.projectCredential.findUnique({
+    where: { ingestionKeyHash: hashedKey },
+    include: { project: { select: { id: true, name: true, website: true, createdAt: true } } }
+  });
+
+  let project = null;
+  if (credential && !credential.revokedAt) {
+    project = credential.project;
+  } else {
+    project = await prisma.project.findFirst({
+      where: { ingestionKeyHash: hashedKey },
+      select: { id: true, name: true, website: true, createdAt: true }
+    });
+  }
+
+  if (!project || (expectedProjectId && project.id !== expectedProjectId)) {
+    res.status(403).json({ error: "project ingestion key is not valid for this project" });
+    return null;
+  }
+  return project;
+};
 
 const checkEventRateLimit = (projectId, res) => {
   const now = Date.now();
-  const existing = eventRateLimitBuckets.get(projectId);
+  const existing = eventRateBuckets.get(projectId);
   const bucket = existing && now - existing.windowStartedAt < eventRateWindowMs
     ? existing
     : { windowStartedAt: now, count: 0 };
-  
+
   if (bucket.count >= eventRateLimit) {
-    res.status(429).json({ error: "rate limit exceeded" });
-    console.log(`[RATE LIMIT] projectId=${projectId}: 429 exceeded (${bucket.count}/${eventRateLimit})`);
+    const retryAfter = Math.max(1, Math.ceil((bucket.windowStartedAt + eventRateWindowMs - now) / 1000));
+    res.set("Retry-After", String(retryAfter));
+    res.status(429).json({ error: "event rate limit exceeded" });
     return false;
   }
-  bucket.count += 1;
-  eventRateLimitBuckets.set(projectId, bucket);
+
+  eventRateBuckets.set(projectId, bucket);
   return true;
 };
 
 const recordAcceptedEvent = (projectId) => {
-  const now = Date.now();
-  const existing = eventRateLimitBuckets.get(projectId);
-  if (existing && now - existing.windowStartedAt < eventRateWindowMs) {
-    existing.count += 1;
-  } else {
-    eventRateLimitBuckets.set(projectId, { windowStartedAt: now, count: 1 });
-  }
+  const bucket = eventRateBuckets.get(projectId);
+  if (bucket) bucket.count += 1;
 };
 
-const loadProject = async (id, res) => {
+app.use(express.json({ limit: "32kb" }));
+app.use((_req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  if (_req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+app.get("/tracker.js", async (_req, res) => {
+  res.type("application/javascript").send(await readFile(trackerPath, "utf8"));
+});
+
+app.get("/health", async (_req, res) => {
   try {
-    const project = await prisma.project.findUnique({ where: { id } });
-    if (!project) {
-      res.status(404).json({ error: "project not found" });
-      return null;
-    }
-    return project;
+    const projectCount = await prisma.project.count();
+    res.json({ status: "ok", database: "connected", projectCount });
   } catch (error) {
-    res.status(500).json({ error: "internal server error" });
-    return null;
+    console.error("Database health check failed", error);
+    res.status(503).json({ status: "error", database: "disconnected" });
   }
-};
+});
 
-const getProjectProblems = async (projectId) => prisma.problem.findMany({ where: { projectId } });
-const getProjectEvents = async (projectId) => prisma.event.findMany({ where: { projectId }, orderBy: { timestamp: "desc" } });
-
-app.get("/api/projects", async (req, res) => {
+const listProjects = async (req, res) => {
   try {
-    const projects = await prisma.project.findMany();
+    const projects = await prisma.project.findMany({ orderBy: { createdAt: 'desc' } });
     return res.json(projects);
   } catch (error) {
     console.error("Project list failed", error);
     return res.status(500).json({ error: "could not load projects" });
   }
+};
+
+app.get(["/projects", "/api/projects"], listProjects);
+
+app.post("/projects", async (req, res) => {
+  return res.status(401).json({ error: "project creation requires an authenticated management flow" });
 });
+
+const elementKey = (event) => {
+  const element = event.element && typeof event.element === "object" ? event.element : {};
+  return [event.page, element.id || element.text || element.role || element.tag || "unknown"].join("|");
+};
+
+const elementLabel = (event) => {
+  const element = event.element && typeof event.element === "object" ? event.element : {};
+  return element.text || element.id || element.role || element.tag || "Unknown element";
+};
+
+const buildProblems = (events) => {
+  const problems = [];
+  const repeatedGroups = new Map();
+  const deadGroups = new Map();
+  const hesitationGroups = new Map();
+  const backtrackingGroups = new Map();
+  const eventsBySession = new Map();
+
+  for (const event of events) {
+    if (!eventsBySession.has(event.sessionId)) eventsBySession.set(event.sessionId, []);
+    eventsBySession.get(event.sessionId).push(event);
+  }
+
+  for (const event of events) {
+    if (event.type === "repeated_click") {
+      const key = elementKey(event);
+      const group = repeatedGroups.get(key) || { event, occurrences: 0 };
+      const metadata = event.metadata && typeof event.metadata === "object" ? event.metadata : {};
+      group.occurrences += Number.isFinite(metadata.count) ? metadata.count : 1;
+      repeatedGroups.set(key, group);
+    }
+
+    if (event.type === "click") {
+      const metadata = event.metadata && typeof event.metadata === "object" ? event.metadata : {};
+      const hoverToClickDuration = metadata.hoverToClickDuration;
+      if (Number.isFinite(hoverToClickDuration) && hoverToClickDuration >= 3000) {
+        const key = elementKey(event);
+        const group = hesitationGroups.get(key) || { event, durations: [] };
+        group.durations.push(hoverToClickDuration);
+        hesitationGroups.set(key, group);
+      }
+
+      const sessionEvents = eventsBySession.get(event.sessionId) || [];
+      const hasNearbyNavigation = sessionEvents.some((candidate) =>
+        candidate.type === "navigation" &&
+        candidate.timestamp > event.timestamp &&
+        candidate.timestamp.getTime() - event.timestamp.getTime() <= 5000
+      );
+      if (!hasNearbyNavigation) {
+        const key = elementKey(event);
+        const group = deadGroups.get(key) || { event, occurrences: 0 };
+        group.occurrences += 1;
+        deadGroups.set(key, group);
+      }
+    }
+  }
+
+  const routeLabel = (route) => {
+    if (typeof route !== "string" || !route) return null;
+    try {
+      return new URL(route, "http://uxlens.local").pathname;
+    } catch {
+      return route;
+    }
+  };
+
+  for (const sessionEvents of eventsBySession.values()) {
+    const navigationEvents = sessionEvents
+      .filter((event) => event.type === "navigation")
+      .sort((a, b) => a.timestamp - b.timestamp);
+
+    for (let startIndex = 0; startIndex < navigationEvents.length; startIndex += 1) {
+      const startMetadata = navigationEvents[startIndex].metadata;
+      const startRoute = routeLabel(startMetadata?.from);
+      if (!startRoute) continue;
+
+      for (let returnIndex = startIndex; returnIndex < navigationEvents.length; returnIndex += 1) {
+        const returnEvent = navigationEvents[returnIndex];
+        const returnRoute = routeLabel(returnEvent.metadata?.to);
+        if (returnRoute !== startRoute) continue;
+
+        const routeSequence = [
+          startRoute,
+          ...navigationEvents
+            .slice(startIndex, returnIndex + 1)
+            .map((event) => routeLabel(event.metadata?.to))
+            .filter(Boolean)
+        ];
+        const key = routeSequence.join("|");
+        const group = backtrackingGroups.get(key) || {
+          event: returnEvent,
+          routeSequence,
+          occurrences: 0
+        };
+        group.occurrences += 1;
+        backtrackingGroups.set(key, group);
+        break;
+      }
+    }
+  }
+
+  for (const { event, occurrences } of repeatedGroups.values()) {
+    problems.push({
+      id: `repeated-${elementKey(event)}`,
+      type: "repeated_click",
+      title: "Repeated clicking",
+      severity: "high",
+      occurrences,
+      page: event.page,
+      element: elementLabel(event),
+      evidence: [`${occurrences} repeated clicks`, "Same element within a short window", "Interaction did not resolve immediately"]
+    });
+  }
+
+  for (const { event, occurrences } of deadGroups.values()) {
+    if (occurrences < 3) continue;
+    problems.push({
+      id: `dead-${elementKey(event)}`,
+      type: "dead_click",
+      title: "Potential dead click",
+      severity: "medium",
+      occurrences,
+      page: event.page,
+      element: elementLabel(event),
+      evidence: [`${occurrences} clicks`, "No navigation detected within five seconds", "Same element"]
+    });
+  }
+
+  for (const { event, durations } of hesitationGroups.values()) {
+    const sortedDurations = [...durations].sort((a, b) => a - b);
+    const middle = Math.floor(sortedDurations.length / 2);
+    const median = sortedDurations.length % 2 === 1
+      ? sortedDurations[middle]
+      : (sortedDurations[middle - 1] + sortedDurations[middle]) / 2;
+    const formattedDuration = median < 1000
+      ? `${Math.round(median)}ms`
+      : `${(median / 1000).toFixed(1)}s`;
+
+    problems.push({
+      id: `hesitation-${elementKey(event)}`,
+      type: "hesitation",
+      title: "Potential hesitation",
+      severity: "medium",
+      occurrences: durations.length,
+      page: event.page,
+      element: elementLabel(event),
+      evidence: [
+        `${durations.length} hesitation events`,
+        `Median hover-to-click time: ${formattedDuration}`,
+        "Hover-to-click delay may indicate uncertainty or hesitation"
+      ]
+    });
+  }
+
+  for (const { event, routeSequence, occurrences } of backtrackingGroups.values()) {
+    problems.push({
+      id: `backtracking-${routeSequence.join("-")}`,
+      type: "backtracking",
+      title: "Potential backtracking",
+      severity: "medium",
+      occurrences,
+      page: routeSequence[routeSequence.length - 1],
+      element: "Navigation",
+      evidence: [
+        routeSequence.join(" -> "),
+        "Navigation returned to an earlier page",
+        "This may indicate users are retracing their path"
+      ]
+    });
+  }
+
+  return problems.sort((a, b) => b.occurrences - a.occurrences);
+};
+
+const getProjectEvents = async (projectId) => prisma.event.findMany({
+  where: { projectId },
+  orderBy: { timestamp: "asc" },
+  select: { id: true, sessionId: true, type: true, page: true, timestamp: true, element: true, metadata: true }
+});
+
+const loadProject = async (projectId, res) => {
+  const project = await prisma.project.findUnique({ where: { id: projectId } });
+  if (!project) {
+    res.status(404).json({ error: "project not found" });
+    return null;
+  }
+  return project;
+};
 
 app.get("/api/projects/:id/problems", async (req, res) => {
   try {
     const project = await loadProject(req.params.id, res);
     if (!project) return;
-    const problems = await getProjectProblems(project.id);
     const events = await getProjectEvents(project.id);
+    const problems = buildProblems(events);
     const summary = Object.fromEntries(problemTypes.map((type) => [
       type,
       problems.filter((problem) => problem.type === type).reduce((total, problem) => total + problem.occurrences, 0)
@@ -200,7 +357,6 @@ const checkSiteResolveRateLimit = (ip, res) => {
 };
 
 const pairingWindows = new Map();
-const PAIRING_WINDOW_MS = 60000;
 
 app.post("/api/sites/analyze", async (req, res) => {
   const ip = req.ip || req.connection.remoteAddress;
@@ -220,7 +376,6 @@ app.post("/api/sites/analyze", async (req, res) => {
 
   try {
     let project = await prisma.project.findUnique({ where: { websiteOrigin: normalizedOrigin } });
-    let created = false;
     
     if (!project) {
       const existingUnlinked = await prisma.project.findFirst({ 
@@ -246,14 +401,9 @@ app.post("/api/sites/analyze", async (req, res) => {
           }
         }
       });
-      created = true;
     }
     
-    const windowEnd = Date.now() + PAIRING_WINDOW_MS;
-    pairingWindows.set(project.id, windowEnd);
-    
-    console.log(`[ANALYZE] normalizedOrigin=${normalizedOrigin}, project ${created ? "created" : "found"} (${project.id}). Pairing window opened for project ${project.id} until ${new Date(windowEnd).toISOString()}.`);
-
+    pairingWindows.set(project.id, Date.now() + 60000);
     return res.json({ id: project.id, name: project.name, website: project.website });
   } catch (error) {
     console.error("Site analyze failed", error);
@@ -281,7 +431,6 @@ app.post("/api/sites/resolve", async (req, res) => {
 
   try {
     let project = await prisma.project.findUnique({ where: { websiteOrigin: normalizedOrigin } });
-    let created = false;
     
     // Migrate existing projects (e.g. Tracker Test Website)
     if (!project) {
@@ -308,10 +457,8 @@ app.post("/api/sites/resolve", async (req, res) => {
           }
         });
         pairingWindows.delete(project.id);
-        console.log(`[RESOLVE] origin=${normalizedOrigin}, project found. Window OPEN. ingestion key ISSUED.`);
         return res.json({ id: project.id, ingestionKey: rawKey });
       }
-      console.log(`[RESOLVE] origin=${normalizedOrigin}, project found. Window CLOSED/NOT PRESENT. ingestion key NOT issued.`);
       return res.json({ id: project.id });
     }
 
@@ -329,7 +476,6 @@ app.post("/api/sites/resolve", async (req, res) => {
       }
     });
 
-    console.log(`[RESOLVE] origin=${normalizedOrigin}, project created. Window N/A. ingestion key ISSUED.`);
     return res.status(201).json({ id: project.id, ingestionKey: rawKey });
   } catch (error) {
     console.error("Site resolve failed", error);
@@ -342,7 +488,6 @@ app.post("/api/events", async (req, res) => {
   const requestedProjectId = projectId || metadata.projectId;
 
   if (typeof requestedProjectId !== "string" || !requestedProjectId) {
-    console.log(`[EVENT FAIL] missing projectId`);
     return res.status(400).json({ error: "projectId is required" });
   }
 
@@ -350,29 +495,16 @@ app.post("/api/events", async (req, res) => {
   if (!project) return;
   if (!checkEventRateLimit(project.id, res)) return;
 
-  if (typeof sessionId !== "string" || !sessionId) {
-    console.log(`[EVENT FAIL] projectId=${project.id}, missing/invalid sessionId`);
-    return res.status(400).json({ error: "sessionId is required" });
-  }
-  if (typeof type !== "string" || !eventTypes.has(type)) {
-    console.log(`[EVENT FAIL] projectId=${project.id}, invalid type=${type}`);
-    return res.status(400).json({ error: "invalid type" });
-  }
-  if (typeof page !== "string" || !page || page.length > 2048) {
-    console.log(`[EVENT FAIL] projectId=${project.id}, invalid page=${page}`);
-    return res.status(400).json({ error: "invalid page" });
-  }
-  if (typeof timestamp !== "number" || !Number.isFinite(timestamp) || !Number.isFinite(new Date(timestamp).getTime())) {
-    console.log(`[EVENT FAIL] projectId=${project.id}, invalid timestamp=${timestamp}`);
-    return res.status(400).json({ error: "invalid timestamp" });
-  }
-  if (typeof element !== "object" || element === null || Array.isArray(element)) {
-    console.log(`[EVENT FAIL] projectId=${project.id}, invalid element`);
-    return res.status(400).json({ error: "invalid element" });
-  }
-  if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
-    console.log(`[EVENT FAIL] projectId=${project.id}, invalid metadata`);
-    return res.status(400).json({ error: "invalid metadata" });
+  if (
+    typeof sessionId !== "string" || !sessionId ||
+    typeof type !== "string" || !eventTypes.has(type) ||
+    typeof page !== "string" || !page || page.length > 2048 ||
+    typeof timestamp !== "number" || !Number.isFinite(timestamp) ||
+    !Number.isFinite(new Date(timestamp).getTime()) ||
+    typeof element !== "object" || element === null || Array.isArray(element) ||
+    typeof metadata !== "object" || metadata === null || Array.isArray(metadata)
+  ) {
+    return res.status(400).json({ error: "sessionId, type, page, timestamp, element, and metadata are required" });
   }
 
   recordAcceptedEvent(project.id);
@@ -394,7 +526,6 @@ app.post("/api/events", async (req, res) => {
         metadata
       }
     });
-    console.log(`[EVENT OK] projectId=${project.id}, type=${type}, id=${event.id}`);
     return res.status(201).json({ id: event.id, sessionId: event.sessionId, type: event.type });
   } catch (error) {
     console.error("Event ingestion failed", error);
@@ -404,7 +535,6 @@ app.post("/api/events", async (req, res) => {
 
 const server = app.listen(port, () => {
   console.log(`Backend listening on http://localhost:${port}`);
-  console.log(`[STARTUP] Event Rate Limit: ${eventRateLimit} per ${eventRateWindowMs / 1000}s. Pairing Window: ${PAIRING_WINDOW_MS / 1000}s.`);
 });
 
 const shutdown = async () => {
