@@ -1,4 +1,5 @@
 import { useEffect, useState, Fragment } from "react";
+import { isDeadClick } from "./shared-rules.js";
 
 const backendUrl = import.meta.env.VITE_API_BASE_URL || "https://uxlens-5kcw.onrender.com";
 
@@ -279,9 +280,7 @@ function UserJourneys({ events }) {
           const hoverDuration = e.metadata?.hoverToClickDuration;
           if (hoverDuration && hoverDuration > 3000) currentNode.friction.add("Hesitation");
           
-          const hasNav = sorted.some(cand => cand.type === 'navigation' && new Date(cand.timestamp).getTime() > new Date(e.timestamp).getTime() && (new Date(cand.timestamp).getTime() - new Date(e.timestamp).getTime()) <= 5000);
-          if (!hasNav && currentNode.friction.size === 0) {
-            // Inference only applied if no explicit navigation found, acting as a visual helper.
+          if (isDeadClick(e, sorted)) {
             currentNode.friction.add("Dead Click");
           }
        }

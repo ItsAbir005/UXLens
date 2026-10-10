@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { hashIngestionKey } from "./project-key.js";
+import { isDeadClick } from "../../frontend/src/shared-rules.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -173,12 +174,7 @@ const buildProblems = (events) => {
       }
 
       const sessionEvents = eventsBySession.get(event.sessionId) || [];
-      const hasNearbyNavigation = sessionEvents.some((candidate) =>
-        (candidate.type === "navigation" || candidate.type === "page_view") &&
-        candidate.timestamp > event.timestamp &&
-        candidate.timestamp.getTime() - event.timestamp.getTime() <= 5000
-      );
-      if (event.element?.responded === false && !hasNearbyNavigation) {
+      if (isDeadClick(event, sessionEvents)) {
         const key = elementKey(event);
         const group = deadGroups.get(key) || { event, occurrences: 0 };
         group.occurrences += 1;
