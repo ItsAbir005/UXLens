@@ -178,7 +178,7 @@ const buildProblems = (events) => {
         candidate.timestamp > event.timestamp &&
         candidate.timestamp.getTime() - event.timestamp.getTime() <= 5000
       );
-      if (!hasNearbyNavigation) {
+      if (event.element?.responded === false && !hasNearbyNavigation) {
         const key = elementKey(event);
         const group = deadGroups.get(key) || { event, occurrences: 0 };
         group.occurrences += 1;
@@ -495,7 +495,8 @@ app.post("/api/sites/resolve", async (req, res) => {
 });
 
 app.post("/api/events", async (req, res) => {
-  const { sessionId, type, page, timestamp, element = {}, metadata = {}, projectId } = req.body ?? {};
+  const { type, page, timestamp, element = {}, metadata = {}, projectId } = req.body ?? {};
+  const sessionId = metadata.sessionId || req.body.sessionId;
   const requestedProjectId = projectId || metadata.projectId;
 
   if (typeof requestedProjectId !== "string" || !requestedProjectId) {

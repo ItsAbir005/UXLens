@@ -27,7 +27,7 @@
     }).join('/');
   };
 
-  const safeElementDetails = (target) => {
+  const safeElementDetails = (target, extra = {}) => {
     const element = findInteractiveElement(target) || (target instanceof Element ? target : null);
     if (!element) return {};
 
@@ -39,6 +39,7 @@
     if (id) details.id = id;
 
     if (tag === "a") {
+      if (typeof extra.responded === "boolean") details.responded = extra.responded;
       return details;
     }
 
@@ -50,6 +51,7 @@
     if (role) details.role = role;
     if (ariaLabel) details.label = ariaLabel;
     else if (visibleLabel) details.label = visibleLabel;
+    if (typeof extra.responded === "boolean") details.responded = extra.responded;
     return details;
   };
 

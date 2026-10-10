@@ -62,11 +62,6 @@ export default function App() {
       })
       .catch((loadError) => setError(loadError.message))
       .finally(() => setLoadingProjects(false));
-  }, [refreshCount]);
-
-  useEffect(() => {
-    const interval = setInterval(() => setRefreshCount(c => c + 1), 5000);
-    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -126,7 +121,8 @@ export default function App() {
           <div><p className="kicker">Product experience / Overview</p><h1>Understand where users pause.</h1></div>
           <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
             <div className="topbar-project">{selectedProject?.website || "Select a project"}</div>
-            <button className="refresh-btn" onClick={() => setRefreshCount(c => c + 1)}>Refresh Data</button>
+            {loadingDashboard && dashboard && <span style={{ fontSize: "0.85rem", color: "#666" }}>Updating...</span>}
+            <button className="refresh-btn" onClick={() => setRefreshCount(c => c + 1)} disabled={loadingDashboard}>Refresh Data</button>
           </div>
         </header>
 
@@ -134,10 +130,10 @@ export default function App() {
 
 
         {error && <div className="alert" role="alert">{error}</div>}
-        {loadingProjects || loadingDashboard ? <div className="state-panel"><span className="loader" />Loading your experience data...</div> : null}
-        {!loadingProjects && !loadingDashboard && !error && projects.length === 0 && <div className="state-panel empty-state"><strong>No project data yet</strong><span>Add a project and install the tracker to see UX signals here.</span></div>}
+        {loadingProjects || (loadingDashboard && !dashboard) ? <div className="state-panel"><span className="loader" />Loading your experience data...</div> : null}
+        {!loadingProjects && !(loadingDashboard && !dashboard) && !error && projects.length === 0 && <div className="state-panel empty-state"><strong>No project data yet</strong><span>Add a project and install the tracker to see UX signals here.</span></div>}
 
-        {!loadingProjects && !loadingDashboard && dashboard && <>
+        {!loadingProjects && dashboard && <>
           <section id="overview" className="summary-section">
             <HealthOverview dashboard={dashboard} events={events} />
             
