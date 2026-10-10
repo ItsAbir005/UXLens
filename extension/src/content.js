@@ -1,4 +1,4 @@
-﻿(async () => {
+(async () => {
   if (window.top !== window) return;
   const log = (stage, data) => globalThis.UXLensLogger && globalThis.UXLensLogger.log("content", stage, data);
 
@@ -71,6 +71,7 @@
         }, () => {
           if (chrome.runtime.lastError) {
             const msg = chrome.runtime.lastError.message || "";
+            if (msg.includes("The message port closed before a response was received")) return;
             log("emit_error", { type, page: payload.page, tag, error: msg });
             if (msg.includes("Extension context invalidated")) {
               shutdown("context_invalidated_callback");
@@ -90,30 +91,37 @@
       }
     };
 
-    let lastPath = UXLensSanitizer.safePage();
-    const checkUrlChange = () => {
-      const currentPath = UXLensSanitizer.safePage();
-      if (currentPath !== lastPath) {
-        lastPath = currentPath;
-        emit("page_view", document.body);
+    let rawLastUrl = location.pathname + location.search;
+    const checkRawUrlChange = () => {
+      const currentRawUrl = location.pathname + location.search;
+      if (currentRawUrl !== rawLastUrl) {
+        rawLastUrl = currentRawUrl;
+        emit("navigation", document.body);
       }
     };
 
-    if (window.navigation) {
-      window.navigation.addEventListener("navigate", (e) => {
-        setTimeout(checkUrlChange, 0);
-      }, { signal });
-    } else {
-      window.addEventListener("popstate", checkUrlChange, { signal });
-      observer = new MutationObserver(checkUrlChange);
-      observer.observe(document, { subtree: true, childList: true });
-    }
+    const originalPushState = history.pushState;
+    history.pushState = function() {
+      originalPushState.apply(this, arguments);
+      checkRawUrlChange();
+    };
+    const originalReplaceState = history.replaceState;
+    history.replaceState = function() {
+      originalReplaceState.apply(this, arguments);
+      checkRawUrlChange();
+    };
+    window.addEventListener("popstate", checkRawUrlChange, { signal });
+    window.addEventListener("hashchange", checkRawUrlChange, { signal });
 
     emit("page_view", document.body);
 
     document.addEventListener("click", (event) => {
       const target = event.composedPath ? event.composedPath()[0] : event.target;
       emit("click", target);
+      if (target instanceof Element && target.closest("a")) {
+        const checkInterval = setInterval(checkRawUrlChange, 100);
+        setTimeout(() => clearInterval(checkInterval), 1000);
+      }
     }, { passive: true, signal, capture: true });
 
     let lastHoverAt = 0;

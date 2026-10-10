@@ -1,4 +1,4 @@
-﻿(() => {
+(() => {
   const log = (stage, data) => globalThis.UXLensLogger && globalThis.UXLensLogger.log("background", stage, data);
   const storageArea = chrome.storage.local;
   const maxRetries = 3;
@@ -6,6 +6,9 @@
   
   let processing = false;
   let sendEventFn = null;
+
+  let chain = Promise.resolve();
+  const withLock = (fn) => { const run = chain.then(fn, fn); chain = run.catch(() => {}); return run; };
 
   const getQueue = async () => {
     try {
@@ -29,17 +32,19 @@
   ]);
 
   const enqueue = async (event) => {
-    const q = await getQueue();
-    const fp = fingerprint(event);
-    if (q.some((i) => i.fingerprint === fp)) {
-      log("enqueue_skipped", { reason: "duplicate_fingerprint", type: event.payload.type });
-      return;
-    }
-    
-    q.push({ event, fingerprint: fp, retries: 0 });
-    await saveQueue(q);
-    log("enqueue_added", { type: event.payload.type, newQueueLength: q.length });
-    
+    await withLock(async () => {
+      const q = await getQueue();
+      const fp = fingerprint(event);
+      if (q.some((i) => i.fingerprint === fp)) {
+        log("enqueue_skipped", { reason: "duplicate_fingerprint", type: event.payload.type });
+        return;
+      }
+      
+      q.push({ event, fingerprint: fp, retries: 0 });
+      if (q.length > 500) q.shift();
+      await saveQueue(q);
+      log("enqueue_added", { type: event.payload.type, newQueueLength: q.length });
+    });
     void processQueue();
   };
 
@@ -48,72 +53,82 @@
     processing = true;
 
     try {
-      let q = await getQueue();
-      while (q.length > 0) {
-        const item = q[0];
+      while (true) {
+        const item = await withLock(async () => {
+          const q = await getQueue();
+          return q.length > 0 ? q[0] : null;
+        });
+
+        if (!item) break;
+
+        let response = null;
+        let fetchError = null;
+
         try {
-          const response = await sendEventFn(item.event);
+          response = await sendEventFn(item.event);
           log("queue_processing", { type: item.event.payload.type, url: item.event.backendUrl, status: response.status, retries: item.retries });
           
           if (!response.ok) {
             const text = await response.text().catch(() => "");
             log("queue_processing_error_body", { type: item.event.payload.type, status: response.status, body: text });
-            
-            if (response.status === 401 || response.status === 403) {
-              log("queue_dropped", { reason: "STALE OR WRONG INGESTION KEY", status: response.status, type: item.event.payload.type });
-              
-              // Clear cache for this origin
+          }
+        } catch (err) {
+          fetchError = err;
+          log("queue_fetch_exception", { error: err.message, type: item.event.payload.type });
+        }
+
+        const shouldStop = await withLock(async () => {
+          const q = await getQueue();
+          const idx = q.findIndex(i => i.fingerprint === item.fingerprint);
+          if (idx === -1) return false;
+          
+          const currentItem = q[idx];
+          let stopProcessing = false;
+
+          if (fetchError) {
+            currentItem.retries++;
+            if (currentItem.retries > maxRetries) {
+              log("queue_dropped", { reason: "max_retries_exceeded_network", type: currentItem.event.payload.type });
+              q.splice(idx, 1);
+            }
+            chrome.alarms.create("uxlens_retry", { delayInMinutes: 1 });
+            stopProcessing = true;
+          } else {
+            if (response.ok) {
+              q.splice(idx, 1);
+            } else if (response.status === 401 || response.status === 403) {
+              log("queue_dropped", { reason: "STALE OR WRONG INGESTION KEY", status: response.status, type: currentItem.event.payload.type });
               try {
-                const originUrl = new URL(item.event.payload.page);
+                const originUrl = new URL(currentItem.event.payload.page);
                 const origin = originUrl.origin;
                 await storageArea.remove(`site_${origin}`);
                 log("queue_cleared_site_cache", { origin });
               } catch (e) {}
-              
-              q.shift();
-              await saveQueue(q);
-              continue;
+              q.splice(idx, 1);
             } else if (response.status === 429) {
-              log("queue_rate_limited", { type: item.event.payload.type });
-              item.retries++;
-              await saveQueue(q);
+              log("queue_rate_limited", { type: currentItem.event.payload.type });
+              currentItem.retries++;
               chrome.alarms.create("uxlens_retry", { delayInMinutes: 1 });
-              break; // Stop processing and wait for alarm
+              stopProcessing = true;
             } else if (response.status >= 500) {
-              item.retries++;
-              if (item.retries > maxRetries) {
-                log("queue_dropped", { reason: "max_retries_exceeded_5xx", type: item.event.payload.type });
-                q.shift();
+              currentItem.retries++;
+              if (currentItem.retries > maxRetries) {
+                log("queue_dropped", { reason: "max_retries_exceeded_5xx", type: currentItem.event.payload.type });
+                q.splice(idx, 1);
               }
-              await saveQueue(q);
               chrome.alarms.create("uxlens_retry", { delayInMinutes: 1 });
-              break;
+              stopProcessing = true;
             } else {
-              // 400 or other 4xx
-              log("queue_dropped", { reason: `client_error_${response.status}`, type: item.event.payload.type });
-              q.shift();
-              await saveQueue(q);
-              continue;
+              log("queue_dropped", { reason: `client_error_${response.status}`, type: currentItem.event.payload.type });
+              q.splice(idx, 1);
             }
           }
-          
-          // Success
-          q.shift();
+
           await saveQueue(q);
-        } catch (err) {
-          log("queue_fetch_exception", { error: err.message, type: item.event.payload.type });
-          item.retries++;
-          if (item.retries > maxRetries) {
-            log("queue_dropped", { reason: "max_retries_exceeded_network", type: item.event.payload.type });
-            q.shift();
-          }
-          await saveQueue(q);
-          chrome.alarms.create("uxlens_retry", { delayInMinutes: 1 });
-          break;
-        }
-        
-        // Refresh queue representation in case multiple tabs enqueued concurrently
-        q = await getQueue();
+          return stopProcessing;
+        });
+
+        if (shouldStop) break;
       }
     } finally {
       processing = false;

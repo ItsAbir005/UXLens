@@ -1,4 +1,4 @@
-﻿importScripts("logger.js", "config.js", "event-queue.js");
+importScripts("logger.js", "config.js", "event-queue.js");
 
 const log = (stage, data) => globalThis.UXLensLogger && globalThis.UXLensLogger.log("background", stage, data);
 
@@ -149,6 +149,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   if (message?.type === "uxlens-event") {
+    sendResponse({ ok: true });
     handleEvent(message, sender).catch(e => {
       log("handleEvent_exception", { error: e.message || e });
     });

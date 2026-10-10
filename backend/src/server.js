@@ -174,7 +174,7 @@ const buildProblems = (events) => {
 
       const sessionEvents = eventsBySession.get(event.sessionId) || [];
       const hasNearbyNavigation = sessionEvents.some((candidate) =>
-        candidate.type === "navigation" &&
+        (candidate.type === "navigation" || candidate.type === "page_view") &&
         candidate.timestamp > event.timestamp &&
         candidate.timestamp.getTime() - event.timestamp.getTime() <= 5000
       );
