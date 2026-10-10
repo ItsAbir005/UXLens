@@ -1,1 +1,0 @@
-import { prisma } from './src/db.js'; async function check() { try { await prisma.project.count(); console.log('Connected!'); } catch (e) { console.error(e); } finally { await prisma.$disconnect(); } } check();

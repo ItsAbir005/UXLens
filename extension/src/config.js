@@ -1,4 +1,4 @@
-﻿(() => {
+(() => {
   const log = (stage, data) => globalThis.UXLensLogger && globalThis.UXLensLogger.log("background", stage, data);
   const defaultBackendUrl = "https://uxlens-5kcw.onrender.com";
   
@@ -32,18 +32,20 @@
     const cached = await chrome.storage.local.get(cacheKey);
     const siteData = cached[cacheKey];
 
-    if (siteData && Date.now() - siteData.timestamp < 3600000) {
-      if (siteData.failedAt) {
+    if (siteData) {
+      if (siteData.ingestionKey) {
+        log("resolve_cache_hit", { origin, age_seconds: Math.floor((Date.now() - siteData.timestamp) / 1000) });
+        return siteData;
+      } else if (siteData.failedAt) {
         const since = Date.now() - siteData.failedAt;
-        const cooldown = siteData.reason === "network" ? 15000 : 60000;
+        const cooldown = siteData.reason === "network" ? 15000 : (siteData.reason === 429 ? 60000 : 5000);
         if (since < cooldown) {
           log("resolve_cooldown_skip", { origin, reason: siteData.reason, seconds_left: Math.ceil((cooldown - since) / 1000) });
           const e = new Error("Site resolution is on cooldown");
-          e.code = "COOLED_DOWN";
+          e.code = siteData.reason === 404 ? "NOT_REGISTERED" : "COOLED_DOWN";
           throw e;
         }
-      } else if (siteData.projectId) {
-        log("resolve_cache_hit", { origin, age_seconds: Math.floor((Date.now() - siteData.timestamp) / 1000) });
+      } else if (!siteData.ingestionKey && !siteData.failedAt && siteData.checkedAt && Date.now() - siteData.checkedAt < 10000) {
         return siteData;
       }
     }
@@ -84,11 +86,12 @@
       throw new Error(`Failed to resolve site configuration: ${response.status}`);
     }
 
-    const { data } = await response.json();
+    const data = await response.json();
     const resultData = {
       projectId: data.id,
       ingestionKey: data.ingestionKey,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      checkedAt: Date.now()
     };
     await chrome.storage.local.set({ [cacheKey]: resultData });
     log("resolve_result", { origin, projectId: data.id, hasKey: !!data.ingestionKey });

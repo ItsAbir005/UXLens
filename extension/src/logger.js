@@ -1,4 +1,4 @@
-﻿const UXLensLogger = {
+const UXLensLogger = {
   log: async (where, stage, data) => {
     // Redact full ingestion keys recursively
     const sanitize = (obj) => {
@@ -25,6 +25,7 @@
       if (logs.length > 200) logs = logs.slice(-200);
       await chrome.storage.local.set({ uxlens_debug_log: logs });
     } catch (e) {
+      if (e.message && e.message.includes("Extension context invalidated")) return;
       console.warn("UXLensLogger error saving to storage", e);
     }
   }

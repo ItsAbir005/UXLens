@@ -6,6 +6,7 @@ import crypto from "node:crypto";
 import { hashIngestionKey } from "./project-key.js";
 
 const app = express();
+app.set("trust proxy", 1);
 const port = process.env.PORT || 4000;
 const trackerPath = fileURLToPath(new URL("../public/tracker.js", import.meta.url));
 const eventTypes = new Set(["page_view", "click", "hover", "scroll", "navigation", "repeated_click"]);
@@ -24,9 +25,11 @@ const bearerKey = (req) => {
 const authenticateProject = async (req, res, expectedProjectId) => {
   const key = bearerKey(req);
   if (!key) {
+    console.log(`[EVENT] projectId=${expectedProjectId} | type=${req.body.type} | OUTCOME: 401 | reason: missing key`);
     res.status(401).json({ error: "project ingestion key is required" });
     return null;
   }
+  const safeKey = key.substring(0, 6) + "...";
 
   const hashedKey = hashIngestionKey(key);
 
@@ -46,13 +49,14 @@ const authenticateProject = async (req, res, expectedProjectId) => {
   }
 
   if (!project || (expectedProjectId && project.id !== expectedProjectId)) {
+    console.log(`[EVENT] projectId=${expectedProjectId} | type=${req.body.type} | OUTCOME: 403 | reason: key ${safeKey} not valid for this project`);
     res.status(403).json({ error: "project ingestion key is not valid for this project" });
     return null;
   }
   return project;
 };
 
-const checkEventRateLimit = (projectId, res) => {
+const checkEventRateLimit = (projectId, req, res) => {
   const now = Date.now();
   const existing = eventRateBuckets.get(projectId);
   const bucket = existing && now - existing.windowStartedAt < eventRateWindowMs
@@ -62,6 +66,7 @@ const checkEventRateLimit = (projectId, res) => {
   if (bucket.count >= eventRateLimit) {
     const retryAfter = Math.max(1, Math.ceil((bucket.windowStartedAt + eventRateWindowMs - now) / 1000));
     res.set("Retry-After", String(retryAfter));
+    console.log(`[EVENT] projectId=${projectId} | type=${req.body.type} | OUTCOME: 429 | reason: rate limit exceeded (${bucket.count})`);
     res.status(429).json({ error: "event rate limit exceeded" });
     return false;
   }
@@ -81,6 +86,17 @@ app.use((_req, res, next) => {
   res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   if (_req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+app.use((req, res, next) => {
+  if (req.path === "/api/sites/analyze" || req.path === "/api/sites/resolve" || req.path === "/api/events") {
+    const start = Date.now();
+    res.on("finish", () => {
+      const ms = Date.now() - start;
+      console.log(`[HTTP] ${req.method} ${req.path} | IP: ${req.ip} | Status: ${res.statusCode} | ${ms}ms`);
+    });
+  }
   next();
 });
 
@@ -376,6 +392,7 @@ app.post("/api/sites/analyze", async (req, res) => {
 
   try {
     let project = await prisma.project.findUnique({ where: { websiteOrigin: normalizedOrigin } });
+    let created = false;
     
     if (!project) {
       const existingUnlinked = await prisma.project.findFirst({ 
@@ -401,9 +418,12 @@ app.post("/api/sites/analyze", async (req, res) => {
           }
         }
       });
+      created = true;
     }
     
-    pairingWindows.set(project.id, Date.now() + 60000);
+    const windowExpires = Date.now() + 60000;
+    pairingWindows.set(project.id, windowExpires);
+    console.log(`[ANALYZE] origin: ${normalizedOrigin} | ${created ? "project created" : "project found"} | pairing window opened until ${new Date(windowExpires).toISOString()}`);
     return res.json({ id: project.id, name: project.name, website: project.website });
   } catch (error) {
     console.error("Site analyze failed", error);
@@ -445,38 +465,29 @@ app.post("/api/sites/resolve", async (req, res) => {
       }
     }
 
-    if (project) {
-      const windowExpires = pairingWindows.get(project.id);
-      if (windowExpires && Date.now() < windowExpires) {
-        // Pairing window is open, generate a new key and give it to the extension
-        const rawKey = crypto.randomBytes(32).toString("hex");
-        await prisma.projectCredential.create({
-          data: {
-            projectId: project.id,
-            ingestionKeyHash: hashIngestionKey(rawKey)
-          }
-        });
-        pairingWindows.delete(project.id);
-        return res.json({ id: project.id, ingestionKey: rawKey });
-      }
-      return res.json({ id: project.id });
+    if (!project) {
+      console.log(`[RESOLVE] origin: ${normalizedOrigin} | project not found`);
+      return res.status(404).json({ error: "site not registered" });
     }
 
-    const rawKey = crypto.randomBytes(32).toString("hex");
-    const hashedKey = hashIngestionKey(rawKey);
+    const windowExpires = pairingWindows.get(project.id);
+    const windowOpen = windowExpires && Date.now() < windowExpires;
 
-    project = await prisma.project.create({
-      data: {
-        name: normalizedOrigin,
-        website: normalizedOrigin,
-        websiteOrigin: normalizedOrigin,
-        credentials: {
-          create: { ingestionKeyHash: hashedKey }
+    if (windowOpen) {
+      const rawKey = crypto.randomBytes(32).toString("hex");
+      await prisma.projectCredential.create({
+        data: {
+          projectId: project.id,
+          ingestionKeyHash: hashIngestionKey(rawKey)
         }
-      }
-    });
+      });
+      pairingWindows.delete(project.id);
+      console.log(`[RESOLVE] origin: ${normalizedOrigin} | project found | window open: true | ingestion key ISSUED`);
+      return res.json({ id: project.id, ingestionKey: rawKey });
+    }
 
-    return res.status(201).json({ id: project.id, ingestionKey: rawKey });
+    console.log(`[RESOLVE] origin: ${normalizedOrigin} | project found | window open: false | ingestion key NOT issued (window closed or already used)`);
+    return res.json({ id: project.id });
   } catch (error) {
     console.error("Site resolve failed", error);
     return res.status(500).json({ error: "could not resolve site" });
@@ -488,23 +499,37 @@ app.post("/api/events", async (req, res) => {
   const requestedProjectId = projectId || metadata.projectId;
 
   if (typeof requestedProjectId !== "string" || !requestedProjectId) {
+    console.log(`[EVENT] projectId=undefined | type=${type} | OUTCOME: 400 | reason: projectId is required`);
     return res.status(400).json({ error: "projectId is required" });
   }
 
   const project = await authenticateProject(req, res, requestedProjectId);
   if (!project) return;
-  if (!checkEventRateLimit(project.id, res)) return;
+  if (!checkEventRateLimit(project.id, req, res)) return;
 
-  if (
-    typeof sessionId !== "string" || !sessionId ||
-    typeof type !== "string" || !eventTypes.has(type) ||
-    typeof page !== "string" || !page || page.length > 2048 ||
-    typeof timestamp !== "number" || !Number.isFinite(timestamp) ||
-    !Number.isFinite(new Date(timestamp).getTime()) ||
-    typeof element !== "object" || element === null || Array.isArray(element) ||
-    typeof metadata !== "object" || metadata === null || Array.isArray(metadata)
-  ) {
-    return res.status(400).json({ error: "sessionId, type, page, timestamp, element, and metadata are required" });
+  if (typeof sessionId !== "string" || !sessionId) {
+    console.log(`[EVENT] projectId=${project.id} | type=${type} | OUTCOME: 400 | reason: invalid or missing sessionId`);
+    return res.status(400).json({ error: "invalid or missing sessionId" });
+  }
+  if (typeof type !== "string" || !eventTypes.has(type)) {
+    console.log(`[EVENT] projectId=${project.id} | type=${type} | OUTCOME: 400 | reason: invalid type`);
+    return res.status(400).json({ error: "invalid type" });
+  }
+  if (typeof page !== "string" || !page || page.length > 2048) {
+    console.log(`[EVENT] projectId=${project.id} | type=${type} | OUTCOME: 400 | reason: invalid page URL`);
+    return res.status(400).json({ error: "invalid page URL" });
+  }
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp) || !Number.isFinite(new Date(timestamp).getTime())) {
+    console.log(`[EVENT] projectId=${project.id} | type=${type} | OUTCOME: 400 | reason: invalid timestamp`);
+    return res.status(400).json({ error: "invalid timestamp" });
+  }
+  if (typeof element !== "object" || element === null || Array.isArray(element)) {
+    console.log(`[EVENT] projectId=${project.id} | type=${type} | OUTCOME: 400 | reason: invalid element`);
+    return res.status(400).json({ error: "invalid element" });
+  }
+  if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
+    console.log(`[EVENT] projectId=${project.id} | type=${type} | OUTCOME: 400 | reason: invalid metadata`);
+    return res.status(400).json({ error: "invalid metadata" });
   }
 
   recordAcceptedEvent(project.id);
@@ -526,6 +551,7 @@ app.post("/api/events", async (req, res) => {
         metadata
       }
     });
+    console.log(`[EVENT] projectId=${project.id} | type=${type} | OUTCOME: 201 | id=${event.id} | stored successfully`);
     return res.status(201).json({ id: event.id, sessionId: event.sessionId, type: event.type });
   } catch (error) {
     console.error("Event ingestion failed", error);
@@ -535,6 +561,7 @@ app.post("/api/events", async (req, res) => {
 
 const server = app.listen(port, () => {
   console.log(`Backend listening on http://localhost:${port}`);
+  console.log(`[STARTUP] Rate limits: ${eventRateLimit} events / ${eventRateWindowMs / 1000}s. Pairing window: 60s.`);
 });
 
 const shutdown = async () => {
