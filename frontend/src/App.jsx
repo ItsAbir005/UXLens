@@ -15,12 +15,16 @@ const getAuthHeaders = () => {
 };
 
 const readJson = async (url) => {
+  console.log(`[UXLens Dashboard] Fetching ${url}...`);
   const response = await fetch(url, { headers: getAuthHeaders() });
   if (!response.ok) {
     if (response.status === 401) throw new Error("Authentication required. Please set your ingestion key.");
     throw new Error("The dashboard could not load this data.");
   }
-  return response.json();
+  const data = await response.json();
+  const count = Array.isArray(data) ? data.length : (data.events ? data.events.length : 1);
+  console.log(`[UXLens Dashboard] Success: ${url} | Status: ${response.status} | Items: ${count}`);
+  return data;
 };
 
 const formatTime = (timestamp) => new Date(timestamp).toLocaleTimeString([], {
@@ -59,11 +63,6 @@ export default function App() {
       .catch((loadError) => setError(loadError.message))
       .finally(() => setLoadingProjects(false));
   }, [refreshCount]);
-
-  useEffect(() => {
-    const interval = setInterval(() => setRefreshCount(c => c + 1), 5000);
-    return () => clearInterval(interval);
-  }, []);
 
   useEffect(() => {
     const interval = setInterval(() => setRefreshCount(c => c + 1), 5000);
@@ -165,6 +164,14 @@ export default function App() {
           </div>
         </>}
       </main>
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "#17342d", color: "#a5b9b0", padding: "0.5rem 1rem", fontSize: "0.75rem", display: "flex", justifyContent: "space-between", zIndex: 9999, fontFamily: "monospace" }}>
+        <span><strong>Backend:</strong> {backendUrl}</span>
+        <span><strong>Project ID:</strong> {selectedProjectId || "None"}</span>
+        <span><strong>Site:</strong> {selectedProject?.website || "None"}</span>
+        <span><strong>Events:</strong> {events?.length || 0}</span>
+        <span><strong>Last Fetch:</strong> {new Date().toLocaleTimeString()}</span>
+        <span style={{ color: error ? "#ff8c8c" : "inherit" }}><strong>Error:</strong> {error || "None"}</span>
+      </div>
     </div>
   );
 }

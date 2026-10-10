@@ -1,1 +1,0 @@
-const fs = require('fs'); let c = fs.readFileSync('frontend/src/App.jsx', 'utf8'); c = c.replace('\\\\nfunction AnalyzeWebsite', '\\nfunction AnalyzeWebsite'); fs.writeFileSync('frontend/src/App.jsx', c);

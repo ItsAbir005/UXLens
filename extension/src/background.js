@@ -1,4 +1,6 @@
-importScripts("config.js", "event-queue.js");
+﻿importScripts("logger.js", "config.js", "event-queue.js");
+
+const log = (stage, data) => globalThis.UXLensLogger && globalThis.UXLensLogger.log("background", stage, data);
 
 const sessionCache = new Map();
 const sessionStoragePrefix = "uxlens-session:";
@@ -41,19 +43,31 @@ const getOrigin = (url) => {
   }
 };
 
-const DEBUG = false;
+// Start logging
+UXLensConfig.readConfig().then(config => {
+  log("sw_started", { backendUrl: config.backendUrl });
+});
 
 UXLensEventQueue.setHandler(async (eventObj) => {
-  if (DEBUG) console.log("Sending event to backend:", eventObj.payload.type);
-  const response = await sendToBackend(eventObj);
-  if (DEBUG) console.log("HTTP Status for", eventObj.payload.type, ":", response.status);
-  return response;
+  return sendToBackend(eventObj);
 });
 
 async function handleEvent(message, sender) {
   const tabId = sender.tab?.id;
   const origin = getOrigin(sender.tab?.url);
-  if (typeof tabId !== "number" || !message?.event || !origin) return;
+  
+  if (typeof tabId !== "number") {
+    log("handleEvent_early_return", { reason: "no_tab_id" });
+    return;
+  }
+  if (!message?.event) {
+    log("handleEvent_early_return", { reason: "no_event_payload" });
+    return;
+  }
+  if (!origin) {
+    log("handleEvent_early_return", { reason: "no_origin" });
+    return;
+  }
   
   const config = await UXLensConfig.readConfig();
   let siteConfig;
@@ -61,13 +75,18 @@ async function handleEvent(message, sender) {
     siteConfig = await UXLensConfig.resolveSite(origin, config.backendUrl);
   } catch (e) {
     if (e.code === "NOT_REGISTERED" || e.code === "COOLED_DOWN") {
-      if (DEBUG) console.debug(`[UXLens DEBUG] handleEvent skipped: ${e.code} for origin=${origin} against backend=${config.backendUrl}`);
+      log("handleEvent_early_return", { reason: `resolve_skipped_${e.code}` });
     } else {
+      log("handleEvent_early_return", { reason: "resolve_error", error: e.message });
       console.warn("UXLens event handling aborted: resolution failed:", e.message);
     }
     return;
   }
-  if (!siteConfig || !siteConfig.projectId || !siteConfig.ingestionKey) return;
+  
+  if (!siteConfig || !siteConfig.projectId || !siteConfig.ingestionKey) {
+    log("handleEvent_early_return", { reason: "missing_project_or_key" });
+    return;
+  }
 
   const sessionId = await getSessionId(tabId, siteConfig.projectId);
   const currentPage = message.event.page || "/";
@@ -85,7 +104,6 @@ async function handleEvent(message, sender) {
   };
 
   if (message.event.type === "page_view" && previousPage && previousPage !== currentPage) {
-    if (DEBUG) console.log("Enqueuing navigation event:", siteConfig.projectId);
     UXLensEventQueue.enqueue({
       backendUrl: config.backendUrl,
       ingestionKey: siteConfig.ingestionKey,
@@ -99,7 +117,6 @@ async function handleEvent(message, sender) {
   }
 
   await sessionStorageArea().set({ [pageKey]: currentPage });
-  if (DEBUG) console.log("Enqueuing base event:", siteConfig.projectId, basePayload.type);
   UXLensEventQueue.enqueue({
     backendUrl: config.backendUrl,
     ingestionKey: siteConfig.ingestionKey,
@@ -108,11 +125,13 @@ async function handleEvent(message, sender) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  log("onMessage_received", { type: message?.type, tabId: sender.tab?.id, url: sender.tab?.url });
+  
   if (message?.type === "configuration-status") {
     const origin = getOrigin(sender.tab?.url);
     if (!origin) {
       sendResponse({ configured: false });
-      return false; // synchronous response
+      return false; 
     }
     
     UXLensConfig.readConfig()
@@ -120,27 +139,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return UXLensConfig.resolveSite(origin, config.backendUrl).then(siteConfig => {
           sendResponse({ configured: Boolean(siteConfig && siteConfig.projectId && siteConfig.ingestionKey) });
         }).catch((e) => {
-          if (e.code === "NOT_REGISTERED" || e.code === "COOLED_DOWN") {
-            if (DEBUG) console.debug(`[UXLens DEBUG] configuration-status skipped: ${e.code} for origin=${origin} against backend=${config.backendUrl}`);
-          } else {
-            console.warn("UXLens configuration failed:", e.message);
-          }
           sendResponse({ configured: false });
         });
       })
       .catch((e) => {
         sendResponse({ configured: false });
       });
-    return true; // asynchronous response
+    return true; 
   }
+  
   if (message?.type === "uxlens-event") {
-    if (DEBUG) console.log("Received event from content script:", message.event?.type);
     handleEvent(message, sender).catch(e => {
-      if (e.code === "NOT_REGISTERED" || e.code === "COOLED_DOWN") {
-        if (DEBUG) console.debug(`[UXLens DEBUG] handleEvent top-level catch: ${e.code}`);
-      } else {
-        console.warn("UXLens handleEvent error:", e.message || e);
-      }
+      log("handleEvent_exception", { error: e.message || e });
     });
   }
   return false;
@@ -149,41 +159,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   void removeTabSessions(tabId);
 });
-// Test connection helper
-globalThis.UXLensTestConnection = async () => {
-  const config = await UXLensConfig.readConfig();
-  console.log(`[Test Connection] Using backendUrl: ${config.backendUrl}`);
-  const origin = "https://example.com";
-  try {
-    console.log(`[Test Connection] Attempting resolveSite for dummy origin ${origin}...`);
-    const siteConfig = await UXLensConfig.resolveSite(origin, config.backendUrl);
-    console.log("[Test Connection] resolveSite succeeded:", siteConfig);
-  } catch (e) {
-    console.log(`[Test Connection] resolveSite expected failure: ${e.code} - ${e.message}`);
-  }
 
-  // Create a synthetic event
-  const dummyPayload = {
-    backendUrl: config.backendUrl,
-    ingestionKey: "dummy_key",
-    payload: {
-      sessionId: "test-session",
-      projectId: "test-project",
-      type: "click",
-      page: "/test",
-      timestamp: Date.now(),
-      element: { tag: "button", text: "Test Connection Button" },
-      metadata: { source: "test" }
+globalThis.UXLensDebug = {
+  status: async () => {
+    const config = await UXLensConfig.readConfig();
+    const storage = await chrome.storage.local.get(null);
+    let queueLength = 0;
+    if (storage.uxlens_event_queue) queueLength = storage.uxlens_event_queue.length;
+    
+    const sites = {};
+    for (const key in storage) {
+      if (key.startsWith('site_')) {
+        sites[key] = { ...storage[key] };
+        if (sites[key].ingestionKey) sites[key].ingestionKey = sites[key].ingestionKey.substring(0, 6) + '...';
+      }
     }
-  };
-
-  console.log("[Test Connection] Posting dummy click event payload...");
-  try {
-    const res = await sendToBackend(dummyPayload);
-    console.log(`[Test Connection] HTTP Status: ${res.status} ${res.statusText}`);
-    const text = await res.text();
-    console.log(`[Test Connection] Response Body: ${text}`);
-  } catch (e) {
-    console.error("[Test Connection] Failed to post dummy event:", e);
+    console.log("=== UXLens Debug Status ===");
+    console.log("Backend URL:", config.backendUrl);
+    console.log("Queue Length:", queueLength);
+    console.log("Sites:", sites);
+  },
+  dump: async () => {
+    const storage = await chrome.storage.local.get("uxlens_debug_log");
+    console.log("=== UXLens Debug Log ===");
+    (storage.uxlens_debug_log || []).forEach(entry => {
+      console.log(`[${entry.timestamp}][${entry.where}][${entry.stage}]`, JSON.stringify(entry.data));
+    });
+  },
+  clear: async () => {
+    const storage = await chrome.storage.local.get(null);
+    const keysToRemove = ["uxlens_debug_log", "uxlens_event_queue"];
+    for (const key in storage) {
+      if (key.startsWith('site_')) keysToRemove.push(key);
+    }
+    await chrome.storage.local.remove(keysToRemove);
+    console.log(`Cleared ${keysToRemove.length} keys.`);
   }
 };

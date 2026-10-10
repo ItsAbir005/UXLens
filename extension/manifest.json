@@ -3,7 +3,7 @@
   "name": "UXLens Privacy-First Collector",
   "version": "0.1.0",
   "description": "Collects privacy-safe UX interaction evidence for a configured UXLens project.",
-  "permissions": ["storage"],
+  "permissions": ["storage", "alarms"],
   "host_permissions": [
     "http://*/*",
     "https://*/*",
@@ -15,7 +15,7 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["src/event-sanitizer.js", "src/content.js"],
+      "js": ["src/logger.js", "src/event-sanitizer.js", "src/content.js"],
       "run_at": "document_idle"
     }
   ],

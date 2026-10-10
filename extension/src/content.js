@@ -1,5 +1,8 @@
-(async () => {
+﻿(async () => {
   if (window.top !== window) return;
+  const log = (stage, data) => globalThis.UXLensLogger && globalThis.UXLensLogger.log("content", stage, data);
+
+  log("script_loaded", { href: location.href, origin: location.origin, top: window.top === window });
 
   let extensionInvalidated = false;
   let observer = null;
@@ -8,11 +11,12 @@
 
   const isContextValid = () => { try { return !!(chrome.runtime && chrome.runtime.id); } catch { return false; } };
 
-  const shutdown = () => {
+  const shutdown = (reason) => {
     if (extensionInvalidated) return;
     extensionInvalidated = true;
     ac.abort();
     observer?.disconnect();
+    log("shutdown", { reason });
     console.debug("UXLens: extension reloaded, tracking stopped. Refresh the page to resume.");
   };
 
@@ -20,17 +24,21 @@
     return new Promise((resolve) => {
       try {
         if (!isContextValid()) {
-          shutdown();
+          shutdown("context_invalid_before_config");
           return resolve(false);
         }
+        log("config_request_sent", {});
         chrome.runtime.sendMessage({ type: "configuration-status" }, (response) => {
           if (chrome.runtime.lastError) {
+            log("config_request_error", { error: chrome.runtime.lastError.message });
             resolve(false);
             return;
           }
+          log("config_response_received", { configured: response?.configured });
           resolve(response?.configured === true);
         });
       } catch (err) {
+        log("config_exception", { message: err.message });
         resolve(false);
       }
     }).catch(() => false);
@@ -41,32 +49,41 @@
   const initTracking = () => {
     if (isTracking || extensionInvalidated) return;
     isTracking = true;
+    log("tracking_started", { message: "Attaching listeners" });
 
     const emit = (type, target) => {
       if (extensionInvalidated) return;
-      if (!isContextValid()) return shutdown();
+      if (!isContextValid()) return shutdown("context_invalid_before_emit");
       
       try {
+        const tag = target ? (target.tagName || "").toLowerCase() : "";
+        const payload = {
+          type,
+          page: UXLensSanitizer.safePage(),
+          timestamp: Date.now(),
+          element: UXLensSanitizer.safeElementDetails(target),
+          metadata: { source: "extension" }
+        };
+        
         chrome.runtime.sendMessage({
           type: "uxlens-event",
-          event: {
-            type,
-            page: UXLensSanitizer.safePage(),
-            timestamp: Date.now(),
-            element: UXLensSanitizer.safeElementDetails(target),
-            metadata: { source: "extension" }
-          }
+          event: payload
         }, () => {
           if (chrome.runtime.lastError) {
             const msg = chrome.runtime.lastError.message || "";
+            log("emit_error", { type, page: payload.page, tag, error: msg });
             if (msg.includes("Extension context invalidated")) {
-              shutdown();
+              shutdown("context_invalidated_callback");
             }
+          } else {
+            log("emit_success", { type, page: payload.page, tag });
           }
         });
       } catch (err) {
-        if (err.message && err.message.includes("Extension context invalidated")) {
-          shutdown();
+        const msg = err.message || "";
+        log("emit_exception", { type, error: msg });
+        if (msg.includes("Extension context invalidated")) {
+          shutdown("context_invalidated_exception");
         } else {
           console.error("UXLens emit failed:", err);
         }
@@ -84,7 +101,6 @@
 
     if (window.navigation) {
       window.navigation.addEventListener("navigate", (e) => {
-        // Small delay to let the URL actually change in the browser before reading it
         setTimeout(checkUrlChange, 0);
       }, { signal });
     } else {
@@ -105,11 +121,23 @@
     document.addEventListener("pointerover", (event) => {
       const targetEl = event.composedPath ? event.composedPath()[0] : event.target;
       const target = UXLensSanitizer.findInteractiveElement(targetEl);
-      if (!target || (event.relatedTarget instanceof Node && target.contains(event.relatedTarget))) return;
-      if (target === lastHoverElement) return;
+      if (!target) {
+        // log("hover_ignored", { reason: "no_interactive_element" }); // Omitting to avoid extreme spam
+        return;
+      }
+      if (event.relatedTarget instanceof Node && target.contains(event.relatedTarget)) {
+        return;
+      }
+      if (target === lastHoverElement) {
+        log("hover_ignored", { reason: "same_element" });
+        return;
+      }
 
       const now = Date.now();
-      if (now - lastHoverAt < 1000) return;
+      if (now - lastHoverAt < 1000) {
+        log("hover_ignored", { reason: "throttle" });
+        return;
+      }
       
       lastHoverAt = now;
       lastHoverElement = target;
@@ -121,6 +149,7 @@
   if (initialConfig) {
     initTracking();
   } else {
+    log("waiting_for_pairing", { message: "Initial config false, waiting for user action" });
     let lastCheck = 0;
     const tryReconfigure = async () => {
       if (isTracking || extensionInvalidated) return;
