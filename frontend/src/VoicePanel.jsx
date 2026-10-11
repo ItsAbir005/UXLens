@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 
 const mcpUrl = import.meta.env.VITE_MCP_URL || "https://uxlens-mcp.onrender.com/mcp";
+const baseUrl = mcpUrl.replace(/\/mcp\/?$/, "");
 
 export default function VoicePanel({ projectId, topProblemType }) {
   const [inputText, setInputText] = useState("");
@@ -124,12 +125,40 @@ export default function VoicePanel({ projectId, topProblemType }) {
     setErrorMessage("");
     setLoading(true);
 
+    // Try POST /ask first
+    try {
+      const askRes = await fetch(`${baseUrl}/ask`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: cleanQuery })
+      });
+      if (askRes.ok) {
+        const askData = await askRes.json();
+        if (askData.answer) {
+          const source = askData.source || "rules";
+          const exchange = {
+            userSaid: cleanQuery,
+            tool: source === "ai" ? "Gemini AI" : "Rules",
+            answer: askData.answer,
+            source
+          };
+          setExchanges((prev) => [exchange, ...prev].slice(0, 5));
+          speak(askData.answer);
+          setLoading(false);
+          return;
+        }
+      }
+    } catch {
+      // /ask failed or unavailable, fall back to MCP tool flow below
+    }
+
+    // Fallback: existing MCP tool routing flow
     const intent = routeIntent(cleanQuery);
 
     if (!intent) {
       const helpAnswer = "I can summarize overall UX health, list friction problems, give design suggestions, or explain why users struggle. What would you like to know?";
       setExchanges((prev) => [
-        { userSaid: cleanQuery, tool: "Help", answer: helpAnswer },
+        { userSaid: cleanQuery, tool: "Help", answer: helpAnswer, source: "rules" },
         ...prev
       ].slice(0, 5));
       setLoading(false);
@@ -140,7 +169,7 @@ export default function VoicePanel({ projectId, topProblemType }) {
     try {
       const { spoken } = await callTool(intent.tool, intent.args);
       setExchanges((prev) => [
-        { userSaid: cleanQuery, tool: intent.tool, answer: spoken },
+        { userSaid: cleanQuery, tool: intent.tool, answer: spoken, source: "rules" },
         ...prev
       ].slice(0, 5));
       speak(spoken);
@@ -148,7 +177,7 @@ export default function VoicePanel({ projectId, topProblemType }) {
       const errorAnswer = `Error: ${err.message}`;
       setErrorMessage(err.message);
       setExchanges((prev) => [
-        { userSaid: cleanQuery, tool: intent.tool, answer: errorAnswer },
+        { userSaid: cleanQuery, tool: intent.tool, answer: errorAnswer, source: "rules" },
         ...prev
       ].slice(0, 5));
       speak("Sorry, I could not complete that request with the UXLens MCP server.");
@@ -338,8 +367,11 @@ export default function VoicePanel({ projectId, topProblemType }) {
                 <div style={{ color: "#627970", font: "500 0.7rem 'DM Mono', monospace", marginBottom: "0.15rem" }}>
                   Tool: <span style={{ color: "#2d6a4f" }}>{item.tool}</span>
                 </div>
-                <div style={{ color: "#304d42" }}>
+                <div style={{ color: "#304d42", marginBottom: "0.25rem" }}>
                   <strong>Answer:</strong> {item.answer}
+                </div>
+                <div style={{ fontSize: "0.7rem", color: item.source === "ai" ? "#2d6a4f" : "#627970", fontStyle: "italic" }}>
+                  {item.source === "ai" ? "Answered by AI from your UXLens data" : "Answered by rules"}
                 </div>
               </div>
             ))}

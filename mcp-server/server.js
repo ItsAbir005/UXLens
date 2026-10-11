@@ -258,6 +258,187 @@ app.use((req, res, next) => {
 
 app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
+const askRateLimits = new Map();
+function checkAskRateLimit(ip) {
+  const now = Date.now();
+  const record = askRateLimits.get(ip);
+  if (!record || now > record.resetAt) {
+    askRateLimits.set(ip, { count: 1, resetAt: now + 60_000 });
+    return true;
+  }
+  if (record.count >= 20) {
+    return false;
+  }
+  record.count += 1;
+  return true;
+}
+
+function ruleBasedAnswer(question, project, summary, problems) {
+  const q = (question || "").toLowerCase();
+  const site = cleanProjectNameForVoice(project?.name);
+
+  if (/(problem|issue|wrong|friction)/.test(q)) {
+    const topProblems = (problems || []).slice(0, 3);
+    const topTypes = topProblems.map(p => (p.type || "").replace(/_/g, " "));
+    return problems.length === 0
+      ? `No user experience problems were detected for ${site}. Everything is running smoothly.`
+      : `Found ${problems.length} friction areas on ${site}. The most common issues are ${topTypes.join(", ")}.`.slice(0, 280);
+  }
+
+  if (/(fix|suggest|improve|recommend|heuristic|design)/.test(q)) {
+    const top = problems?.[0];
+    if (!top) return "No design suggestions needed, no friction events recorded.";
+    const h = top.heuristic || { name: "Visibility of system status", suggestion: "Add immediate feedback or clear instructions." };
+    const typeLabel = (top.type || "issue").replace(/_/g, " ");
+    return `For ${typeLabel}, Nielsen heuristic ${h.name} suggests: ${h.suggestion.charAt(0).toLowerCase() + h.suggestion.slice(1)}.`.slice(0, 280);
+  }
+
+  if (/(why|evidence|detail)/.test(q)) {
+    const problem = problems?.[0];
+    if (!problem) return "No evidence found because no UX problems have been detected yet.";
+    const typeName = (problem.type || "friction").replace(/_/g, " ");
+    const rationale = problem.heuristic?.rationale || "Users experienced friction interacting with this part of the interface";
+    return `Found ${problem.occurrences} instances of ${typeName}. ${rationale}.`.slice(0, 280);
+  }
+
+  if (/(how|doing|health|score|summary|overall)/.test(q)) {
+    const totalDetected = (problems || []).reduce((sum, p) => sum + p.occurrences, 0);
+    let health = "good";
+    if (totalDetected > 20) health = "poor";
+    else if (totalDetected > 5) health = "fair";
+    return `Overall user experience health for ${site} is ${health}. We recorded ${totalDetected} total friction events, including ${summary?.dead_click || 0} dead clicks and ${summary?.repeated_click || 0} repeated clicks.`.slice(0, 280);
+  }
+
+  return "I can summarize overall UX health, list friction problems, give design suggestions, or explain why users struggle. What would you like to know?";
+}
+
+app.post("/ask", async (req, res) => {
+  const { question } = req.body ?? {};
+  if (typeof question !== "string" || !question.trim() || question.length > 300) {
+    return res.status(400).json({ error: "Invalid question. Question must be a non-empty string of at most 300 characters." });
+  }
+
+  const clientIp = req.ip || req.connection?.remoteAddress || "127.0.0.1";
+  if (!checkAskRateLimit(clientIp)) {
+    return res.status(429).json({ error: "Rate limit exceeded. Maximum 20 requests per minute." });
+  }
+
+  let project = { name: "website" };
+  let summary = {};
+  let problems = [];
+  let events = [];
+
+  try {
+    const projId = defaultProjectId;
+    if (projId) {
+      const [problemsRes, eventsRes] = await Promise.all([
+        requestBackend(`/api/projects/${encodeURIComponent(projId)}/problems`),
+        requestBackend(`/api/projects/${encodeURIComponent(projId)}/events`)
+      ]);
+      project = problemsRes.project || project;
+      summary = problemsRes.summary || summary;
+      problems = problemsRes.problems || problems;
+      events = eventsRes.events || events;
+    }
+  } catch {}
+
+  const geminiApiKey = process.env.GEMINI_API_KEY;
+  if (!geminiApiKey) {
+    return res.json({
+      answer: ruleBasedAnswer(question, project, summary, problems),
+      source: "rules"
+    });
+  }
+
+  const pageCounts = {};
+  for (const ev of events) {
+    if (ev.page) pageCounts[ev.page] = (pageCounts[ev.page] || 0) + 1;
+  }
+  const topPages = Object.entries(pageCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([page, count]) => ({ page, count }));
+
+  const recentNavigations = events
+    .filter(ev => ev.type === "navigation" || ev.type === "page_view")
+    .slice(-10)
+    .map(ev => ({ type: ev.type, page: ev.page, from: ev.metadata?.from, to: ev.metadata?.to }));
+
+  const context = {
+    totalEvents: events.length,
+    sessionCount: new Set(events.map(e => e.sessionId)).size,
+    signalCounts: {
+      dead_click: summary.dead_click || 0,
+      repeated_click: summary.repeated_click || 0,
+      hesitation: summary.hesitation || 0,
+      backtracking: summary.backtracking || 0
+    },
+    problems: problems.slice(0, 5).map(p => ({
+      type: p.type,
+      page: p.page,
+      element: p.element,
+      occurrences: p.occurrences,
+      evidence: p.evidence,
+      heuristic: p.heuristic ? {
+        id: p.heuristic.id,
+        name: p.heuristic.name,
+        rationale: p.heuristic.rationale,
+        suggestion: p.heuristic.suggestion
+      } : null
+    })),
+    topPages,
+    recentNavigations
+  };
+
+  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+    const geminiRes = await fetch(geminiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": geminiApiKey
+      },
+      body: JSON.stringify({
+        systemInstruction: {
+          parts: [{
+            text: "You are UXLens, a voice assistant that explains UX friction. Answer ONLY from the provided JSON data. Never invent numbers, pages or problems; if the data cannot answer, say so plainly. Answer the user's actual question (what, where, why, or how to fix), reference the relevant Nielsen heuristic by name when giving advice, and give concrete practical steps. Reply in at most 3 short plain sentences (under 400 characters), no markdown, no lists, no URLs. For unrelated questions, say what you can help with."
+          }]
+        },
+        contents: [{
+          parts: [{
+            text: `UXLens Context Data:\n${JSON.stringify(context)}\n\nUser Question:\n${question}`
+          }]
+        }]
+      }),
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+
+    if (geminiRes.ok) {
+      const geminiData = await geminiRes.json();
+      const rawAnswer = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (rawAnswer && typeof rawAnswer === "string" && rawAnswer.trim()) {
+        const cleanAnswer = rawAnswer.trim().slice(0, 400);
+        return res.json({ answer: cleanAnswer, source: "ai" });
+      }
+    }
+    return res.json({
+      answer: ruleBasedAnswer(question, project, summary, problems),
+      source: "rules"
+    });
+  } catch {
+    clearTimeout(timer);
+    return res.json({
+      answer: ruleBasedAnswer(question, project, summary, problems),
+      source: "rules"
+    });
+  }
+});
+
 app.post("/mcp", async (req, res) => {
   const server = buildServer();
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
