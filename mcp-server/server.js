@@ -5,9 +5,25 @@ import { z } from "zod";
 
 const backendUrl = (process.env.BACKEND_URL || "http://localhost:4000").replace(/\/$/, "");
 const ingestionKey = process.env.UXLENS_PROJECT_INGESTION_KEY;
+const defaultProjectId = process.env.UXLENS_DEFAULT_PROJECT_ID;
+
+function resolveProjectId(projectId) {
+  const id = projectId || defaultProjectId;
+  if (!id) {
+    throw new Error("No projectId provided and UXLENS_DEFAULT_PROJECT_ID is not configured.");
+  }
+  return id;
+}
+
+function cleanProjectNameForVoice(name) {
+  if (!name) return "the website";
+  let clean = name.replace(/^https?:\/\//i, "").replace(/\/.*$/, "").replace(/^www\./i, "");
+  clean = clean.replace(/\.[a-z]{2,}$/i, "");
+  return clean || "the website";
+}
 
 const problemDetailsShape = {
-  projectId: z.string().min(1),
+  projectId: z.string().min(1).optional().describe("The unique ID of the project"),
   problemTypeOrId: z.string().min(1).optional(),
   problemType: z.string().min(1).optional(),
   problemId: z.string().min(1).optional()
@@ -53,14 +69,18 @@ function buildServer() {
   server.tool(
     "get_ux_summary",
     "Use this when the user asks for an overall assessment of website UX friction. Answers general health questions. Returns high-level metrics and aggregate counts of issues found. Do not overclaim scientific certainty.",
-    { projectId: z.string().min(1).describe("The unique ID of the project to analyze") }, 
+    { projectId: z.string().min(1).optional().describe("The unique ID of the project to analyze") }, 
     async ({ projectId }) => {
       try {
-        const { project, summary, problems } = await requestBackend(`/api/projects/${encodeURIComponent(projectId)}/problems`);
+        const targetProjectId = resolveProjectId(projectId);
+        const { project, summary, problems } = await requestBackend(`/api/projects/${encodeURIComponent(targetProjectId)}/problems`);
         const totalDetected = problems.reduce((sum, p) => sum + p.occurrences, 0);
         let overallHealth = "Good";
         if (totalDetected > 20) overallHealth = "Poor";
         else if (totalDetected > 5) overallHealth = "Fair";
+
+        const site = cleanProjectNameForVoice(project.name);
+        const spoken = `Overall user experience health for ${site} is ${overallHealth.toLowerCase()}. We recorded ${totalDetected} total friction events, including ${summary.dead_click || 0} dead clicks and ${summary.repeated_click || 0} repeated clicks.`.slice(0, 280);
 
         return jsonResult({
           summary: `Overall UX Health appears ${overallHealth}. Detected ${totalDetected} total potential friction events.`,
@@ -72,7 +92,8 @@ function buildServer() {
             backtrackingCount: summary.backtracking || 0,
             totalDetectedProblemAreas: problems.length
           },
-          recommendedNextStep: "Use get_ux_problems to identify which pages or elements have the most severe issues."
+          recommendedNextStep: "Use get_ux_problems to identify which pages or elements have the most severe issues.",
+          spoken
         });
       } catch (error) {
         return errorResult(error);
@@ -83,19 +104,27 @@ function buildServer() {
   server.tool(
     "get_ux_problems",
     "Use this when the user asks what UX problems exist, which problems are most common, or which pages have the most friction. Returns a summarized list of top detected friction areas.",
-    { projectId: z.string().min(1).describe("The unique ID of the project") }, 
+    { projectId: z.string().min(1).optional().describe("The unique ID of the project") }, 
     async ({ projectId }) => {
       try {
-        const { project, problems } = await requestBackend(`/api/projects/${encodeURIComponent(projectId)}/problems`);
+        const targetProjectId = resolveProjectId(projectId);
+        const { project, problems } = await requestBackend(`/api/projects/${encodeURIComponent(targetProjectId)}/problems`);
         const topProblems = problems.slice(0, 10).map(({ id, type, title, severity, occurrences, page, element }) => ({
           id, type, title, severity, occurrences, page, element
         }));
+
+        const site = cleanProjectNameForVoice(project.name);
+        const topTypes = topProblems.slice(0, 3).map(p => p.type.replace(/_/g, " "));
+        const spoken = problems.length === 0
+          ? `No user experience problems were detected for ${site}. Everything is running smoothly.`
+          : `Found ${problems.length} friction areas on ${site}. The most common issues are ${topTypes.join(", ")}.`.slice(0, 280);
 
         return jsonResult({
           summary: `Found ${problems.length} distinct problem areas. Showing top ${topProblems.length}.`,
           projectName: project.name,
           topProblems,
-          recommendedNextStep: "Use get_problem_details with a specific problem ID or type to get evidence for why users are struggling there."
+          recommendedNextStep: "Use get_problem_details with a specific problem ID or type to get evidence for why users are struggling there.",
+          spoken
         });
       } catch (error) {
         return errorResult(error);
@@ -109,15 +138,21 @@ function buildServer() {
     problemDetailsShape, 
     async ({ projectId, problemTypeOrId, problemType, problemId }) => {
       try {
+        const targetProjectId = resolveProjectId(projectId);
         const selector = problemId || problemType || problemTypeOrId;
         if (!selector) {
           return errorResult(new Error("Provide problemTypeOrId, problemType, or problemId."));
         }
-        const { project, problems } = await requestBackend(`/api/projects/${encodeURIComponent(projectId)}/problems`);
+        const { project, problems } = await requestBackend(`/api/projects/${encodeURIComponent(targetProjectId)}/problems`);
         const problem = problems.find(({ id, type }) => id === selector || type === selector);
         if (!problem) {
           return errorResult(new Error(`No UX problem found for "${selector}".`));
         }
+
+        const typeName = (problem.type || "friction").replace(/_/g, " ");
+        const rationale = problem.heuristic?.rationale || "Users experienced friction interacting with this part of the interface";
+        const spoken = `Found ${problem.occurrences} instances of ${typeName}. ${rationale}.`.slice(0, 280);
+
         return jsonResult({
           summary: `Evidence for ${problem.title} on page ${problem.page}`,
           projectName: project.name,
@@ -125,7 +160,50 @@ function buildServer() {
           elementAffected: problem.element,
           occurrences: problem.occurrences,
           evidence: problem.evidence,
-          recommendedNextStep: "Use get_session_timeline to view the full journey of a user experiencing this problem, or summarize this evidence for the user."
+          recommendedNextStep: "Use get_session_timeline to view the full journey of a user experiencing this problem, or summarize this evidence for the user.",
+          spoken
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  server.tool(
+    "get_design_suggestions",
+    "Use this when the user asks for design suggestions, recommendations, or heuristic fixes for UX issues. Returns suggestions for the top 3 problem areas based on Nielsen heuristics.",
+    { projectId: z.string().min(1).optional().describe("The unique ID of the project") },
+    async ({ projectId }) => {
+      try {
+        const targetProjectId = resolveProjectId(projectId);
+        const { project, problems } = await requestBackend(`/api/projects/${encodeURIComponent(targetProjectId)}/problems`);
+        const top3 = (problems || []).slice(0, 3);
+        const suggestions = top3.map((problem) => {
+          const h = problem.heuristic || {
+            id: 1,
+            name: "Visibility of system status",
+            suggestion: "Add immediate feedback or make interactive elements clear."
+          };
+          const typeLabel = (problem.type || "issue").replace(/_/g, " ");
+          const suggestionText = h.suggestion || "Provide immediate visual feedback for user actions.";
+          const spoken = `For ${typeLabel}, ${suggestionText.charAt(0).toLowerCase() + suggestionText.slice(1)}.`.slice(0, 280);
+          return {
+            type: problem.type,
+            page: problem.page,
+            heuristic: {
+              id: h.id,
+              name: h.name
+            },
+            suggestion: suggestionText,
+            spoken
+          };
+        });
+
+        return jsonResult({
+          summary: `Top ${suggestions.length} design suggestions based on Nielsen heuristics.`,
+          projectName: project.name,
+          suggestions,
+          spoken: (suggestions.map(s => s.spoken).join(" ") || "No design suggestions yet.").slice(0, 280)
         });
       } catch (error) {
         return errorResult(error);
@@ -136,10 +214,11 @@ function buildServer() {
   server.tool(
     "get_session_timeline",
     "Use this when the user asks what a user did during a session, wants to understand a problematic journey, or asks if users are getting stuck before a specific step like checkout.",
-    { projectId: z.string().min(1).describe("The unique ID of the project") }, 
+    { projectId: z.string().min(1).optional().describe("The unique ID of the project") }, 
     async ({ projectId }) => {
       try {
-        const { project, events } = await requestBackend(`/api/projects/${encodeURIComponent(projectId)}/events`);
+        const targetProjectId = resolveProjectId(projectId);
+        const { project, events } = await requestBackend(`/api/projects/${encodeURIComponent(targetProjectId)}/events`);
         const meaningfulTypes = new Set(["page_view", "click", "navigation", "repeated_click"]);
         const timeline = events
           .filter(({ type }) => meaningfulTypes.has(type))

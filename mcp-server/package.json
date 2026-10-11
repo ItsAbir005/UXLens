@@ -10,7 +10,6 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "express": "^5.1.0",
-    "uxlens": "file:..",
     "zod": "^4.1.12"
   }
 }
