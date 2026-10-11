@@ -333,7 +333,14 @@ function ProblemCard({ problem }) {
   return (
     <article className="problem-card">
       <div className="problem-card-top">
-        <span className={`severity ${severity}`}>{severity}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: ".5rem", flexWrap: "wrap" }}>
+          <span className={`severity ${severity}`}>{severity}</span>
+          {problem.heuristic && (
+            <span style={{ padding: ".2rem .45rem", borderRadius: "3px", font: "500 .62rem 'DM Mono', monospace", background: "#edf3ed", color: "#2d5240", border: "1px solid #d4e0d6" }}>
+              H{problem.heuristic.id} · {problem.heuristic.name}
+            </span>
+          )}
+        </div>
         <span className="occurrences">{problem.occurrences} occurrences</span>
       </div>
       <h3 style={{ textTransform: "capitalize" }}>{problem.type.replace("_", " ")}</h3>
@@ -347,6 +354,11 @@ function ProblemCard({ problem }) {
           {problem.evidence.map((item) => <li key={item}>{item}</li>)}
         </ul>
       </div>
+      {problem.heuristic?.suggestion && (
+        <div style={{ marginTop: ".8rem", paddingTop: ".6rem", borderTop: "1px solid #edf1ed", fontSize: ".76rem", color: "#304d42", lineHeight: 1.4 }}>
+          <strong>Suggested fix:</strong> {problem.heuristic.suggestion}
+        </div>
+      )}
     </article>
   );
 }

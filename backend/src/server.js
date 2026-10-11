@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { hashIngestionKey } from "./project-key.js";
 import { isDeadClick } from "../../frontend/src/shared-rules.js";
+import { mapProblemToHeuristic } from "./heuristics.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -297,7 +298,12 @@ const buildProblems = (events) => {
     });
   }
 
-  return problems.sort((a, b) => b.occurrences - a.occurrences);
+  return problems
+    .map((problem) => ({
+      ...problem,
+      heuristic: mapProblemToHeuristic(problem)
+    }))
+    .sort((a, b) => b.occurrences - a.occurrences);
 };
 
 const getProjectEvents = async (projectId) => prisma.event.findMany({
