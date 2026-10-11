@@ -248,9 +248,11 @@ function buildServer() {
 
 const app = express();
 app.use(express.json());
-app.use((_req, res, next) => {
+app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "Content-Type");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Accept, Mcp-Protocol-Version, Mcp-Session-Id");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
 
@@ -258,7 +260,7 @@ app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
 app.post("/mcp", async (req, res) => {
   const server = buildServer();
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   res.on("close", () => { void transport.close(); void server.close(); });
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);

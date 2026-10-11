@@ -1,5 +1,6 @@
 import { useEffect, useState, Fragment } from "react";
 import { isDeadClick } from "./shared-rules.js";
+import VoicePanel from "./VoicePanel.jsx";
 
 const backendUrl = import.meta.env.VITE_API_BASE_URL || "https://uxlens-5kcw.onrender.com";
 
@@ -136,6 +137,7 @@ export default function App() {
 
         {!loadingProjects && dashboard && <>
           <section id="overview" className="summary-section">
+            <VoicePanel projectId={selectedProjectId} topProblemType={dashboard?.problems?.[0]?.type} />
             <HealthOverview dashboard={dashboard} events={events} />
             
             <div className="section-heading"><div><p className="kicker">Signal overview</p><h2>UX friction breakdown</h2></div><span className="updated-label">{dashboard.problems.length} detected signals</span></div>
